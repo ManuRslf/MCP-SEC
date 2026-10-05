@@ -218,3 +218,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local credentials and agent state
+.env.*
+!.env.example
+.aws/
+.codex/
+.agents/
+
+# Generated experiment output
+sandbox/output/*
+!sandbox/output/.gitkeep

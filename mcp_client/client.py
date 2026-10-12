@@ -26,6 +26,18 @@ async def main() -> None:
             for tool in response.tools:
                 print(f"Available tool: {tool.name}")
 
+            path = PROJECT_ROOT / "sandbox" / "public" / "useful_data.txt"
+
+            result = await session.call_tool(
+                "read_file",
+                arguments={"path": str(path)},
+            )
+
+            if result.is_error:
+                print("Read failed:", result.content)
+            else:
+                print(result.structured_content)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

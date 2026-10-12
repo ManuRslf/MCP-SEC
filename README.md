@@ -13,21 +13,22 @@ The experiment separates three questions:
 2. Did the gateway block that call?
 3. Did the final answer reveal the dummy secret?
 
-The policy, gateway, filesystem tools, and their tests are implemented. Connecting
-the application MCP client and LLM agent is the next stage. See
-[PROGRESS.md](PROGRESS.md) for completed and pending work, and [goal.txt](goal.txt)
-for the initial experiment specification.
+The policy, gateway, filesystem tools, and their tests are implemented. The
+application MCP client can launch the server, initialize a session, and discover
+tools. Tool execution, gateway integration, and the LLM agent are the next stages.
+See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
+[goal.txt](goal.txt) for the initial experiment specification.
 
 ## Architecture
 
-The diagram shows the intended complete flow. The agent and application MCP
-client are still pending; the tests already include a working MCP client.
+The diagram shows the intended complete flow. The agent and gateway-to-client
+connection are still pending; the application client currently discovers tools.
 
 ```mermaid
 flowchart LR
     User[User task] --> Agent[LLM agent - planned]
     Agent --> Gateway[Security gateway and policy]
-    Gateway --> Client[MCP client - planned]
+    Gateway --> Client[MCP client - discovery only]
     Client --> Server[MCP filesystem server]
     Server --> Sandbox[Sandbox files]
 ```
@@ -40,6 +41,8 @@ flowchart LR
   forwards approved requests to an executor, and returns structured responses.
 - [mcp_server/server.py](mcp_server/server.py) exposes `read_file`, `write_file`,
   and `list_directory` through MCP over stdio.
+- [mcp_client/client.py](mcp_client/client.py) starts the server, initializes an
+  MCP session, lists available tools, and closes the session and process.
 - [tests/](tests/) verifies each component and includes a real subprocess MCP
   connection test. Filesystem tests use temporary directories and dummy data.
 
@@ -112,6 +115,17 @@ The commands below use a Linux or macOS shell.
    ```bash
    python -m pytest tests/test_server.py::test_stdio_tool_discovery_and_execution -v
    ```
+
+5. Run the application client to initialize a connection and discover tools.
+
+   ```bash
+   python -m mcp_client.client
+   ```
+
+   The client starts and stops its own server; no separately running server is
+   needed. It prints the initialization message and the names `read_file`,
+   `write_file`, and `list_directory`. It does not yet execute tools or use the
+   gateway.
 
 Docker configuration and an agent entry point are still pending. The current
 `Dockerfile` and `compose.yaml` are empty placeholders.

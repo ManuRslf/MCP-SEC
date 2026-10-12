@@ -123,3 +123,8 @@ step is requested, verify the previous implementation, update
 [PROGRESS.md](PROGRESS.md), and commit verified changes before proposing the next
 task. Update this README when setup instructions, architecture, or project status
 change.
+
+Reuse recorded verification for unchanged code. Review an already-verified code
+file again only after it has been modified, and run focused checks for new or
+modified implementations. Documentation-only updates do not require rerunning
+code tests.

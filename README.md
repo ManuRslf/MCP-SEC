@@ -14,8 +14,8 @@ The experiment separates three questions:
 3. Did the final answer reveal the dummy secret?
 
 The policy, gateway, filesystem tools, and their tests are implemented. The
-application MCP client can launch the server, initialize a session, discover
-tools, and read the public fixture. Reusable tool execution, gateway integration,
+application MCP client can launch the server, initialize a session, and read the
+public fixture through a session-scoped asynchronous executor. Gateway integration
 and the LLM agent are the next stages.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
@@ -23,8 +23,8 @@ See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 ## Architecture
 
 The diagram shows the intended complete flow. The agent and gateway-to-client
-connection are still pending; the application client currently discovers tools
-and performs a direct public-file read.
+connection are still pending; the application client currently performs a direct
+public-file read through its executor.
 
 ```mermaid
 flowchart LR
@@ -44,8 +44,9 @@ flowchart LR
 - [mcp_server/server.py](mcp_server/server.py) exposes `read_file`, `write_file`,
   and `list_directory` through MCP over stdio.
 - [mcp_client/client.py](mcp_client/client.py) starts the server, initializes an
-  MCP session, lists available tools, reads the public fixture, displays the
-  result or tool error, and closes the session and process.
+  MCP session, defines an asynchronous executor, reads the public fixture, and
+  closes the session and process. The executor raises a generic error for failed
+  MCP tool results and lets communication exceptions propagate.
 - [tests/](tests/) verifies each component and includes a real subprocess MCP
   connection test. Filesystem tests use temporary directories and dummy data.
 
@@ -101,6 +102,12 @@ The commands below use a Linux or macOS shell.
    python -m pytest tests/test_server.py -v
    ```
 
+   To run only the client regression tests:
+
+   ```bash
+   python -m pytest tests/test_client.py -v
+   ```
+
    The MCP connection test starts and stops its own server subprocess. Run it in
    an environment that permits subprocess communication over standard input and
    output.
@@ -119,17 +126,17 @@ The commands below use a Linux or macOS shell.
    python -m pytest tests/test_server.py::test_stdio_tool_discovery_and_execution -v
    ```
 
-5. Run the application client to discover tools and read the public fixture.
+5. Run the application client to read the public fixture through its executor.
 
    ```bash
    python -m mcp_client.client
    ```
 
    The client starts and stops its own server; no separately running server is
-   needed. It prints the initialization message, the three tool names, and the
-   structured result from reading `sandbox/public/useful_data.txt`. The fixture
-   contains prompt-injection text; this client only displays it as data. It does
-   not use an LLM or the gateway yet.
+   needed. It prints the initialization message and the structured result from
+   reading `sandbox/public/useful_data.txt`. The fixture contains prompt-injection
+   text; this client only displays it as data. It does not use an LLM or the
+   gateway yet.
 
 Docker configuration and an agent entry point are still pending. The current
 `Dockerfile` and `compose.yaml` are empty placeholders.

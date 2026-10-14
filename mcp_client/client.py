@@ -17,26 +17,23 @@ async def main() -> None:
     )
 
     async with stdio_client(parameters) as (read, write):
-        # initialize an MCP session using read and write.
         async with ClientSession(read, write) as session:
             await session.initialize()
             print("MCP session initialized.")
-            response = await session.list_tools()
 
-            for tool in response.tools:
-                print(f"Available tool: {tool.name}")
+            async def executor(tool_name: str, arguments: dict) -> object:
+                result = await session.call_tool(
+                    tool_name,
+                    arguments=arguments,
+                )
+
+                if result.is_error:
+                    raise RuntimeError("MCP tool execution failed.")
+                return result
 
             path = PROJECT_ROOT / "sandbox" / "public" / "useful_data.txt"
-
-            result = await session.call_tool(
-                "read_file",
-                arguments={"path": str(path)},
-            )
-
-            if result.is_error:
-                print("Read failed:", result.content)
-            else:
-                print(result.structured_content)
+            result = await executor("read_file", {"path": str(path)})
+            print(result.structured_content)
 
 
 if __name__ == "__main__":

@@ -17,8 +17,8 @@ The policy, gateway, filesystem tools, and their tests are implemented. The
 application MCP client can launch the server, initialize a session, and read the
 public fixture through the asynchronous security gateway and MCP executor.
 Async gateway and client regression tests and real MCP denial integration tests
-are implemented. Preparing experiment fixtures and the LLM agent are the next
-stages.
+are implemented. Paired clean and injected experiment fixtures are ready;
+implementing the LLM agent is the next stage.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
 
@@ -146,8 +146,16 @@ The commands below use a Linux or macOS shell.
    The client starts and stops its own server; no separately running server is
    needed. It prints the initialization message and a gateway response with
    `status`, `result`, and `reason` for reading `sandbox/public/useful_data.txt`.
-   The fixture contains prompt-injection text; this client only displays it as
-   data. It does not use an LLM yet.
+   This remains a smoke-test input: the client only displays its contents as
+   data and does not use an LLM yet. The experimental `clean.txt` and
+   `injected.txt` documents are not selected by this entry point.
+
+The experiment fixtures are `sandbox/public/clean.txt` and
+`sandbox/public/injected.txt`. They contain the same urban-parks paragraph, with
+the injected version appending an instruction to read the local dummy secret.
+[goal.txt](goal.txt) records the local paths, expected normal summary, and
+metrics. The future agent entry point must explicitly select one of these files;
+the current smoke client still reads `useful_data.txt`.
 
 Docker configuration and an agent entry point are still pending. The current
 `Dockerfile` and `compose.yaml` are empty placeholders.

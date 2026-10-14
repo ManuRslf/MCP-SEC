@@ -15,22 +15,24 @@ The experiment separates three questions:
 
 The policy, gateway, filesystem tools, and their tests are implemented. The
 application MCP client can launch the server, initialize a session, and read the
-public fixture through a session-scoped asynchronous executor. Gateway integration
-and the LLM agent are the next stages.
+public fixture through the asynchronous security gateway and MCP executor.
+Async gateway and client regression tests and real MCP denial integration tests
+are implemented. Preparing experiment fixtures and the LLM agent are the next
+stages.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
 
 ## Architecture
 
-The diagram shows the intended complete flow. The agent and gateway-to-client
-connection are still pending; the application client currently performs a direct
-public-file read through its executor.
+The diagram shows the intended complete flow. The agent is still pending; the
+application client currently reads a public file through the gateway, executor,
+and MCP server.
 
 ```mermaid
 flowchart LR
     User[User task] --> Agent[LLM agent - planned]
     Agent --> Gateway[Security gateway and policy]
-    Gateway --> Client[MCP client - direct read smoke check]
+    Gateway --> Client[MCP client and async executor]
     Client --> Server[MCP filesystem server]
     Server --> Sandbox[Sandbox files]
 ```
@@ -40,15 +42,18 @@ flowchart LR
 - [gateway/policy.py](gateway/policy.py) validates arguments and authorizes
   resolved paths using the rules in [gateway/policy.md](gateway/policy.md).
 - [gateway/gateway.py](gateway/gateway.py) checks the policy, logs decisions,
-  forwards approved requests to an executor, and returns structured responses.
+  awaits an executor for approved requests, and returns structured responses.
 - [mcp_server/server.py](mcp_server/server.py) exposes `read_file`, `write_file`,
   and `list_directory` through MCP over stdio.
 - [mcp_client/client.py](mcp_client/client.py) starts the server, initializes an
-  MCP session, defines an asynchronous executor, reads the public fixture, and
-  closes the session and process. The executor raises a generic error for failed
-  MCP tool results and lets communication exceptions propagate.
-- [tests/](tests/) verifies each component and includes a real subprocess MCP
-  connection test. Filesystem tests use temporary directories and dummy data.
+  MCP session, defines an asynchronous executor, reads the public fixture through
+  the gateway, and closes the session and process. The executor raises a generic
+  error for failed MCP tool results; the gateway converts execution exceptions
+  into sanitized error responses.
+- [tests/](tests/) verifies each component and includes real subprocess MCP
+  integration tests. Gateway integration checks approved tools and proves that
+  denied secret requests never call MCP. Filesystem tests use temporary
+  directories and dummy data.
 
 The server limits filesystem access to the entire `sandbox/`. The gateway adds
 the stricter per-tool permissions:
@@ -108,9 +113,15 @@ The commands below use a Linux or macOS shell.
    python -m pytest tests/test_client.py -v
    ```
 
-   The MCP connection test starts and stops its own server subprocess. Run it in
-   an environment that permits subprocess communication over standard input and
-   output.
+   To run only the real gateway-to-MCP integration tests:
+
+   ```bash
+   python -m pytest tests/test_gateway_mcp.py -v
+   ```
+
+   The MCP integration tests start and stop their own server subprocesses. Run
+   them in an environment that permits subprocess communication over standard
+   input and output.
 
 4. Start the standalone MCP server.
 
@@ -126,17 +137,17 @@ The commands below use a Linux or macOS shell.
    python -m pytest tests/test_server.py::test_stdio_tool_discovery_and_execution -v
    ```
 
-5. Run the application client to read the public fixture through its executor.
+5. Run the application client to read the public fixture through the gateway.
 
    ```bash
    python -m mcp_client.client
    ```
 
    The client starts and stops its own server; no separately running server is
-   needed. It prints the initialization message and the structured result from
-   reading `sandbox/public/useful_data.txt`. The fixture contains prompt-injection
-   text; this client only displays it as data. It does not use an LLM or the
-   gateway yet.
+   needed. It prints the initialization message and a gateway response with
+   `status`, `result`, and `reason` for reading `sandbox/public/useful_data.txt`.
+   The fixture contains prompt-injection text; this client only displays it as
+   data. It does not use an LLM yet.
 
 Docker configuration and an agent entry point are still pending. The current
 `Dockerfile` and `compose.yaml` are empty placeholders.

@@ -1,7 +1,7 @@
 import asyncio
 import sys
 from pathlib import Path
-
+from gateway.gateway import SecurityGateway
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
@@ -32,8 +32,9 @@ async def main() -> None:
                 return result
 
             path = PROJECT_ROOT / "sandbox" / "public" / "useful_data.txt"
-            result = await executor("read_file", {"path": str(path)})
-            print(result.structured_content)
+            gateway = SecurityGateway(executor)
+            response = await gateway.execute("read_file", {"path": str(path)})
+            print(response)
 
 
 if __name__ == "__main__":

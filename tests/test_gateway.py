@@ -1,14 +1,18 @@
+import asyncio
 import logging
-from unittest.mock import Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
 from gateway.gateway import SecurityGateway
 
 
+pytestmark = pytest.mark.asyncio
+
+
 @pytest.fixture
 def executor():
-    return Mock(return_value="Fake tool result")
+    return AsyncMock(return_value="Fake tool result")
 
 
 @pytest.mark.parametrize("tool,folder,name", [
@@ -16,15 +20,15 @@ def executor():
     ("list_directory", "public", ""),
     ("write_file", "output", "summary.txt"),
 ])
-def test_allowed_requests_execute_once_and_return_success(sandbox, executor, tool, folder, name):
+async def test_allowed_requests_execute_once_and_return_success(sandbox, executor, tool, folder, name):
     path = sandbox[folder] / name
     arguments = {"path": str(path)}
     if tool == "write_file":
         arguments["content"] = "Summary"
 
-    response = SecurityGateway(executor).execute(tool, arguments)
+    response = await SecurityGateway(executor).execute(tool, arguments)
 
-    executor.assert_called_once_with(tool, arguments)
+    executor.assert_awaited_once_with(tool, arguments)
     assert response == {
         "status": "success",
         "result": "Fake tool result",
@@ -34,7 +38,7 @@ def test_allowed_requests_execute_once_and_return_success(sandbox, executor, too
 
 @pytest.mark.parametrize("tool", ["read_file", "list_directory", "write_file"])
 @pytest.mark.parametrize("escape", ["direct", "traversal", "symlink"])
-def test_secret_access_is_denied_without_execution(sandbox, executor, tool, escape):
+async def test_secret_access_is_denied_without_execution(sandbox, executor, tool, escape):
     root = sandbox["output" if tool == "write_file" else "public"]
     name = "" if tool == "list_directory" else "password.txt"
     target = sandbox["secrets"] / name
@@ -49,7 +53,7 @@ def test_secret_access_is_denied_without_execution(sandbox, executor, tool, esca
     if tool == "write_file":
         arguments["content"] = "Summary"
 
-    response = SecurityGateway(executor).execute(tool, arguments)
+    response = await SecurityGateway(executor).execute(tool, arguments)
 
     assert response["status"] == "denied"
     assert response["result"] is None
@@ -58,10 +62,10 @@ def test_secret_access_is_denied_without_execution(sandbox, executor, tool, esca
 
 
 @pytest.mark.parametrize("tool", ["delete_file", None, []])
-def test_unknown_tools_never_reach_executor(sandbox, executor, tool):
+async def test_unknown_tools_never_reach_executor(sandbox, executor, tool):
     arguments = {"path": str(sandbox["public"] / "document.txt")}
 
-    response = SecurityGateway(executor).execute(tool, arguments)
+    response = await SecurityGateway(executor).execute(tool, arguments)
 
     assert response["status"] == "denied"
     executor.assert_not_called()
@@ -74,8 +78,8 @@ def test_unknown_tools_never_reach_executor(sandbox, executor, tool):
     {"path": 123},
     {"path": "relative.txt"},
 ])
-def test_invalid_arguments_never_reach_executor(executor, arguments):
-    response = SecurityGateway(executor).execute("read_file", arguments)
+async def test_invalid_arguments_never_reach_executor(executor, arguments):
+    response = await SecurityGateway(executor).execute("read_file", arguments)
 
     assert response["status"] == "denied"
     assert response["result"] is None
@@ -84,7 +88,7 @@ def test_invalid_arguments_never_reach_executor(executor, arguments):
 
 
 @pytest.mark.parametrize("invalid", ["missing_content", "wrong_content_type", "extra_key"])
-def test_invalid_write_arguments_never_reach_executor(sandbox, executor, invalid):
+async def test_invalid_write_arguments_never_reach_executor(sandbox, executor, invalid):
     arguments = {"path": str(sandbox["output"] / "summary.txt"), "content": "Summary"}
     if invalid == "missing_content":
         arguments.pop("content")
@@ -93,14 +97,14 @@ def test_invalid_write_arguments_never_reach_executor(sandbox, executor, invalid
     else:
         arguments["unexpected"] = True
 
-    response = SecurityGateway(executor).execute("write_file", arguments)
+    response = await SecurityGateway(executor).execute("write_file", arguments)
 
     assert response["status"] == "denied"
     executor.assert_not_called()
 
 
 @pytest.mark.parametrize("tool", ["read_file", "list_directory", "write_file"])
-def test_allowed_symlinks_forward_resolved_strings_without_mutating_input(sandbox, executor, tool):
+async def test_allowed_symlinks_forward_resolved_strings_without_mutating_input(sandbox, executor, tool):
     root = sandbox["output" if tool == "write_file" else "public"]
     target = root
     if tool == "read_file":
@@ -116,15 +120,15 @@ def test_allowed_symlinks_forward_resolved_strings_without_mutating_input(sandbo
     original_arguments = arguments.copy()
     expected_arguments = {**arguments, "path": str(target.resolve())}
 
-    response = SecurityGateway(executor).execute(tool, arguments)
+    response = await SecurityGateway(executor).execute(tool, arguments)
 
     assert response["status"] == "success"
-    executor.assert_called_once_with(tool, expected_arguments)
+    executor.assert_awaited_once_with(tool, expected_arguments)
     assert arguments == original_arguments
-    assert isinstance(executor.call_args.args[1]["path"], str)
+    assert isinstance(executor.await_args.args[1]["path"], str)
 
 
-def test_executor_mutations_do_not_change_callers_arguments(sandbox, executor):
+async def test_executor_mutations_do_not_change_callers_arguments(sandbox, executor):
     arguments = {
         "path": str(sandbox["output"] / "summary.txt"),
         "content": "Original content",
@@ -137,34 +141,34 @@ def test_executor_mutations_do_not_change_callers_arguments(sandbox, executor):
 
     executor.side_effect = mutate_arguments
 
-    response = SecurityGateway(executor).execute("write_file", arguments)
+    response = await SecurityGateway(executor).execute("write_file", arguments)
 
     assert response["status"] == "success"
-    executor.assert_called_once()
+    executor.assert_awaited_once()
     assert arguments == original_arguments
 
 
-def test_callers_can_reuse_arguments(sandbox, executor):
+async def test_callers_can_reuse_arguments(sandbox, executor):
     arguments = {"path": str(sandbox["public"] / "document.txt")}
     gateway = SecurityGateway(executor)
 
-    first_response = gateway.execute("read_file", arguments)
-    second_response = gateway.execute("read_file", arguments)
+    first_response = await gateway.execute("read_file", arguments)
+    second_response = await gateway.execute("read_file", arguments)
 
     assert first_response["status"] == second_response["status"] == "success"
-    assert executor.call_count == 2
+    assert executor.await_count == 2
 
 
 @pytest.mark.parametrize("error", [OSError, ValueError, RuntimeError])
-def test_executor_exceptions_return_generic_errors(sandbox, executor, caplog, error):
+async def test_executor_exceptions_return_generic_errors(sandbox, executor, caplog, error):
     confidential_detail = "DUMMY_CONFIDENTIAL_EXCEPTION_DETAIL"
     executor.side_effect = error(confidential_detail)
     arguments = {"path": str(sandbox["public"] / "document.txt")}
 
     with caplog.at_level(logging.INFO, logger="gateway.gateway"):
-        response = SecurityGateway(executor).execute("read_file", arguments)
+        response = await SecurityGateway(executor).execute("read_file", arguments)
 
-    executor.assert_called_once()
+    executor.assert_awaited_once()
     assert response == {
         "status": "error",
         "result": None,
@@ -175,11 +179,11 @@ def test_executor_exceptions_return_generic_errors(sandbox, executor, caplog, er
 
 
 @pytest.mark.parametrize("allowed", [True, False])
-def test_default_logger_records_authorization_decision(sandbox, executor, caplog, allowed):
+async def test_default_logger_records_authorization_decision(sandbox, executor, caplog, allowed):
     path = sandbox["public"] / "document.txt" if allowed else sandbox["secrets"] / "password.txt"
 
     with caplog.at_level(logging.INFO, logger="gateway.gateway"):
-        response = SecurityGateway(executor).execute("read_file", {"path": str(path)})
+        response = await SecurityGateway(executor).execute("read_file", {"path": str(path)})
 
     assert response["status"] == ("success" if allowed else "denied")
     records = [record for record in caplog.records if record.name == "gateway.gateway"]
@@ -195,7 +199,7 @@ def test_default_logger_records_authorization_decision(sandbox, executor, caplog
 
 
 @pytest.mark.parametrize("status", ["success", "denied", "error"])
-def test_custom_logger_excludes_content_results_and_exception_details(sandbox, executor, caplog, status):
+async def test_custom_logger_excludes_content_results_and_exception_details(sandbox, executor, caplog, status):
     content = "DUMMY_WRITE_CONTENT_NOT_FOR_LOGS"
     result = "DUMMY_TOOL_RESULT_NOT_FOR_LOGS"
     exception_detail = "DUMMY_EXCEPTION_DETAIL_NOT_FOR_LOGS"
@@ -207,7 +211,7 @@ def test_custom_logger_excludes_content_results_and_exception_details(sandbox, e
     logger = logging.getLogger("tests.security_gateway")
 
     with caplog.at_level(logging.INFO, logger=logger.name):
-        response = SecurityGateway(executor, logger=logger).execute("write_file", arguments)
+        response = await SecurityGateway(executor, logger=logger).execute("write_file", arguments)
 
     assert response["status"] == status
     records = [record for record in caplog.records if record.name == logger.name]
@@ -219,4 +223,14 @@ def test_custom_logger_excludes_content_results_and_exception_details(sandbox, e
     if status == "denied":
         executor.assert_not_called()
     else:
-        executor.assert_called_once()
+        executor.assert_awaited_once()
+
+
+async def test_executor_cancellation_propagates(sandbox, executor):
+    executor.side_effect = asyncio.CancelledError()
+    arguments = {"path": str(sandbox["public"] / "document.txt")}
+
+    with pytest.raises(asyncio.CancelledError):
+        await SecurityGateway(executor).execute("read_file", arguments)
+
+    executor.assert_awaited_once_with("read_file", arguments)

@@ -1,9 +1,11 @@
+import asyncio
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 
+from gateway import policy
 from mcp_client import client
 
 
@@ -54,15 +56,14 @@ async def test_read_runs_inside_initialized_session(client_connection, capsys):
     session.call_tool.assert_awaited_once_with(
         "read_file", arguments={"path": str(path)}
     )
-    assert capsys.readouterr().out == (
-        "MCP session initialized.\n{'result': 'Public document'}\n"
-    )
+    expected_response = {"status": "success", "result": result, "reason": None}
+    assert capsys.readouterr().out == f"MCP session initialized.\n{expected_response}\n"
     assert not state["session_active"]
-    transport.__aexit__.assert_awaited_once()
+    transport.__aexit__.assert_awaited_once_with(None, None, None)
 
 
 @pytest.mark.asyncio
-async def test_tool_failure_raises_generic_error(client_connection, capsys):
+async def test_tool_failure_returns_generic_gateway_error(client_connection, capsys):
     session, state, transport = client_connection
     session.call_tool.return_value = SimpleNamespace(
         is_error=True,
@@ -70,21 +71,71 @@ async def test_tool_failure_raises_generic_error(client_connection, capsys):
         structured_content=None,
     )
 
-    with pytest.raises(RuntimeError, match=r"^MCP tool execution failed\.$"):
+    await client.main()
+
+    captured = capsys.readouterr()
+    expected_response = {
+        "status": "error", "result": None, "reason": "Tool execution failed."
+    }
+    assert captured.out == f"MCP session initialized.\n{expected_response}\n"
+    assert "Sensitive server details" not in captured.out + captured.err
+    session.call_tool.assert_awaited_once()
+    assert not state["session_active"]
+    transport.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_connection_error_returns_generic_gateway_error(client_connection, capsys):
+    session, state, transport = client_connection
+    session.call_tool.side_effect = ConnectionError("Sensitive connection details")
+
+    await client.main()
+
+    captured = capsys.readouterr()
+    expected_response = {
+        "status": "error", "result": None, "reason": "Tool execution failed."
+    }
+    assert captured.out == f"MCP session initialized.\n{expected_response}\n"
+    assert "Sensitive connection details" not in captured.out + captured.err
+    session.call_tool.assert_awaited_once()
+    assert not state["session_active"]
+    transport.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_policy_denial_never_calls_mcp(client_connection, monkeypatch, tmp_path, capsys):
+    session, state, transport = client_connection
+    monkeypatch.setitem(policy.ALLOWED_ROOTS, "read_file", tmp_path)
+
+    await client.main()
+
+    assert "'status': 'denied'" in capsys.readouterr().out
+    session.call_tool.assert_not_called()
+    assert not state["session_active"]
+    transport.__aexit__.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_propagates_and_closes_session(client_connection):
+    session, state, transport = client_connection
+    session.call_tool.side_effect = asyncio.CancelledError()
+
+    with pytest.raises(asyncio.CancelledError):
         await client.main()
 
-    assert "Sensitive server details" not in capsys.readouterr().out
+    session.call_tool.assert_awaited_once()
     assert not state["session_active"]
     transport.__aexit__.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_connection_error_propagates_and_closes_session(client_connection):
+async def test_initialization_failure_closes_session_without_tool_call(client_connection):
     session, state, transport = client_connection
-    session.call_tool.side_effect = ConnectionError("Connection closed")
+    session.initialize.side_effect = ConnectionError("Initialization failed")
 
-    with pytest.raises(ConnectionError, match="Connection closed"):
+    with pytest.raises(ConnectionError, match="Initialization failed"):
         await client.main()
 
+    session.call_tool.assert_not_called()
     assert not state["session_active"]
     transport.__aexit__.assert_awaited_once()

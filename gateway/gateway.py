@@ -1,17 +1,17 @@
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Awaitable
 from .policy import authorize
 
 
 class SecurityGateway:
     def __init__(self,
-                 executor: Callable[[str, dict], object],
+                 executor: Callable[[str, dict], Awaitable[object]],
                  logger: logging.Logger | None = None,
                  ) -> None:
         self.executor = executor
         self.logger = logger if logger is not None else logging.getLogger(__name__)
 
-    def execute(
+    async def execute(
         self,
         tool_name: str,
         arguments: dict,
@@ -37,7 +37,7 @@ class SecurityGateway:
         approved_arguments["path"] = str(decision.resolved_path)
 
         try:
-            result = self.executor(tool_name, approved_arguments)
+            result = await self.executor(tool_name, approved_arguments)
         except Exception:
             return {
                 "status": "error",

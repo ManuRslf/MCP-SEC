@@ -3,3 +3,4 @@ openai
 pydantic
 pytest
 pytest-asyncio
+ollama

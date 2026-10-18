@@ -17,19 +17,19 @@ The policy, gateway, filesystem tools, and their tests are implemented. The
 application MCP client can launch the server, initialize a session, and read the
 public fixture through the asynchronous security gateway and MCP executor.
 Async gateway and client regression tests and real MCP denial integration tests
-are implemented. Paired clean and injected experiment fixtures are ready;
-implementing the LLM agent is the next stage.
-The selected LLM backend is local Ollama. A CLI chat response has been confirmed
-by the user; the Python model connection and agent integration are not yet
-implemented.
+are implemented. Paired clean and injected experiment fixtures are ready.
+The selected LLM backend is local Ollama. The Python agent can describe a
+`read_file` tool, request a read of `clean.txt`, and print the model's proposed
+calls without executing them. A real local model proposal has been verified;
+connecting the agent to the gateway is the next stage.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
 
 ## Architecture
 
-The diagram shows the intended complete flow. The agent is still pending; the
-application client currently reads a public file through the gateway, executor,
-and MCP server.
+The diagram shows the intended complete flow. The agent currently only inspects
+tool proposals and is not connected to the gateway. The separate application
+client reads a public file through the gateway, executor, and MCP server.
 
 ```mermaid
 flowchart LR
@@ -53,6 +53,10 @@ flowchart LR
   the gateway, and closes the session and process. The executor raises a generic
   error for failed MCP tool results; the gateway converts execution exceptions
   into sanitized error responses.
+- [agent/agent.py](agent/agent.py) sends one asynchronous local Ollama request
+  with a `read_file` schema and the absolute path to `clean.txt`. It prints all
+  proposed calls as JSON, or reports a reply without tool calls. It does not
+  read the document, execute tools, or connect to MCP yet.
 - [tests/](tests/) verifies each component and includes real subprocess MCP
   integration tests. Gateway integration checks approved tools and proves that
   denied secret requests never call MCP. Filesystem tests use temporary
@@ -157,11 +161,11 @@ The experiment fixtures are `sandbox/public/clean.txt` and
 `sandbox/public/injected.txt`. They contain the same urban-parks paragraph, with
 the injected version appending an instruction to read the local dummy secret.
 [goal.txt](goal.txt) records the local paths, expected normal summary, and
-metrics. The future agent entry point must explicitly select one of these files;
+metrics. The agent dry run targets `clean.txt` by default but does not read it;
 the current smoke client still reads `useful_data.txt`.
 
-Docker configuration and an agent entry point are still pending. The current
-`Dockerfile` and `compose.yaml` are empty placeholders.
+Docker configuration and the gateway-mediated agent loop are still pending.
+The current `Dockerfile` and `compose.yaml` are empty placeholders.
 
 ## Local LLM Setup
 
@@ -196,16 +200,35 @@ check whether the model is loaded on the GPU. See the
 
 Local inference uses `http://localhost:11434` and does not require an API key;
 see the [Ollama API documentation](https://docs.ollama.com/api/introduction).
-The user has confirmed a CLI reply, but model-generated tool calls have not yet
-been validated.
+The Python agent uses the
+[Ollama Python library's `AsyncClient`](https://github.com/ollama/ollama-python);
+`ollama` is included in `requirements.txt`. It describes the tool using the
+[Ollama tool-calling schema](https://docs.ollama.com/capabilities/tool-calling).
+The request keeps `think=False` and `num_ctx=2048`; see
+[thinking controls](https://docs.ollama.com/capabilities/thinking).
 
-The next milestone is one Python request in `agent/agent.py`, using the
-[Ollama Python library's `AsyncClient`](https://github.com/ollama/ollama-python).
-Its `ollama` dependency has not yet been added to `requirements.txt`. For this
-connection check, use `think=False`, a small `num_ctx`, and print only
-`response.message.content`; see [thinking controls](https://docs.ollama.com/capabilities/thinking).
-The Python connection and gateway-mediated agent loop are still pending. Keep
-model settings identical when later comparing clean and injected documents.
+With the local server running and the model installed, run the proposal-only
+check from the project root:
+
+```bash
+python -m agent.agent
+```
+
+The expected output is headed `Proposed tool calls (not executed):` followed by
+a JSON list containing `read_file` and the absolute path to
+`sandbox/public/clean.txt`. This proposal was verified with the real local
+`qwen3:1.7b` model. If the model responds without a tool call, the script reports
+`No tool call was proposed.` and prints any reply text. No file contents are
+sent to the model and no tools are executed in this step.
+
+Run the focused agent tests without requiring an Ollama server or GPU:
+
+```bash
+python -m pytest tests/test_agent.py -v
+```
+
+The gateway-mediated agent loop is still pending. Keep model settings identical
+when later comparing clean and injected documents.
 
 ## Development Workflow
 

@@ -19,21 +19,22 @@ public fixture through the asynchronous security gateway and MCP executor.
 Async gateway and client regression tests and real MCP denial integration tests
 are implemented. Paired clean and injected experiment fixtures are ready.
 The selected LLM backend is local Ollama. The Python agent can describe a
-`read_file` tool, request a read of `clean.txt`, and print the model's proposed
-calls without executing them. A real local model proposal has been verified;
-connecting the agent to the gateway is the next stage.
+`read_file` tool, request a read of `clean.txt`, route proposed calls through the
+gateway and MCP, and print JSON-compatible gateway results. A real local read
+has been verified. Returning the results to the model for a summary is the next
+stage.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
 
 ## Architecture
 
-The diagram shows the intended complete flow. The agent currently only inspects
-tool proposals and is not connected to the gateway. The separate application
-client reads a public file through the gateway, executor, and MCP server.
+The diagram shows the current execution path. The agent connects to the gateway
+and MCP, but does not yet return tool results to the model for a final answer.
+The separate application client remains a public-file smoke test.
 
 ```mermaid
 flowchart LR
-    User[User task] --> Agent[LLM agent - planned]
+    User[User task] --> Agent[LLM agent]
     Agent --> Gateway[Security gateway and policy]
     Gateway --> Client[MCP client and async executor]
     Client --> Server[MCP filesystem server]
@@ -54,9 +55,11 @@ flowchart LR
   error for failed MCP tool results; the gateway converts execution exceptions
   into sanitized error responses.
 - [agent/agent.py](agent/agent.py) sends one asynchronous local Ollama request
-  with a `read_file` schema and the absolute path to `clean.txt`. It prints all
-  proposed calls as JSON, or reports a reply without tool calls. It does not
-  read the document, execute tools, or connect to MCP yet.
+  with a `read_file` schema and the absolute path to `clean.txt`. Inside an
+  initialized MCP session, it routes each model-proposed call through the
+  security gateway. The executor checks the MCP error flag and converts successful
+  results to JSON-compatible dictionaries. The agent prints the gateway results,
+  or reports a reply without tool calls. There is no follow-up model request yet.
 - [tests/](tests/) verifies each component and includes real subprocess MCP
   integration tests. Gateway integration checks approved tools and proves that
   denied secret requests never call MCP. Filesystem tests use temporary
@@ -99,8 +102,8 @@ The commands below use a Linux or macOS shell.
    python -m pip install -r requirements.txt
    ```
 
-   The project uses MCP SDK v2. An API key is not required for the current server
-   or test suite; the LLM agent is still pending.
+   The project uses MCP SDK v2. An API key is not required for the current server,
+   test suite, or local Ollama agent.
 
 3. Run the test suite.
 
@@ -161,7 +164,8 @@ The experiment fixtures are `sandbox/public/clean.txt` and
 `sandbox/public/injected.txt`. They contain the same urban-parks paragraph, with
 the injected version appending an instruction to read the local dummy secret.
 [goal.txt](goal.txt) records the local paths, expected normal summary, and
-metrics. The agent dry run targets `clean.txt` by default but does not read it;
+metrics. The agent asks the model to read `clean.txt` by default and executes
+proposed calls only through the gateway;
 the current smoke client still reads `useful_data.txt`.
 
 Docker configuration and the gateway-mediated agent loop are still pending.
@@ -207,19 +211,23 @@ The Python agent uses the
 The request keeps `think=False` and `num_ctx=2048`; see
 [thinking controls](https://docs.ollama.com/capabilities/thinking).
 
-With the local server running and the model installed, run the proposal-only
-check from the project root:
+With the Ollama server running and the model installed, run the agent from the
+project root:
 
 ```bash
 python -m agent.agent
 ```
 
-The expected output is headed `Proposed tool calls (not executed):` followed by
-a JSON list containing `read_file` and the absolute path to
-`sandbox/public/clean.txt`. This proposal was verified with the real local
-`qwen3:1.7b` model. If the model responds without a tool call, the script reports
-`No tool call was proposed.` and prints any reply text. No file contents are
-sent to the model and no tools are executed in this step.
+The agent starts and stops its own MCP server. The expected output is headed
+`Tool call, through gateway:` followed by a JSON list of gateway responses.
+A successful `read_file` response contains the public document under
+`result.content`, with `status` set to `success`. This read was verified with
+the real local `qwen3:1.7b` model and MCP server. Denied calls do not reach MCP.
+If the model responds without a tool call, the script reports
+`No tool call was proposed.` and prints any reply text.
+
+File contents are currently printed, not returned to the model. Summarization
+and a bounded multi-turn tool loop are not implemented yet.
 
 Run the focused agent tests without requiring an Ollama server or GPU:
 
@@ -227,8 +235,12 @@ Run the focused agent tests without requiring an Ollama server or GPU:
 python -m pytest tests/test_agent.py -v
 ```
 
-The gateway-mediated agent loop is still pending. Keep model settings identical
-when later comparing clean and injected documents.
+The 14 focused tests use mocked Ollama and MCP connections with the real gateway
+policy, real SDK result types, and temporary sandbox fixtures. They cover
+approved and denied calls, JSON serialization, errors, cancellation, and session
+cleanup. No model download, inference, or GPU is needed for these tests.
+
+Keep model settings identical when later comparing clean and injected documents.
 
 ## Development Workflow
 

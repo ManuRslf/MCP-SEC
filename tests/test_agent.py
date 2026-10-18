@@ -1,6 +1,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,6 +18,7 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture
 def agent_runtime(monkeypatch, sandbox):
     state = {"transport": False, "session": False, "initialized": False}
+    requests = []
 
     async def initialize():
         assert state["transport"] and state["session"]
@@ -28,7 +30,9 @@ def agent_runtime(monkeypatch, sandbox):
 
     async def chat(**kwargs):
         assert state["session"] and state["initialized"]
-        return client.chat.return_value
+        requests.append(deepcopy(kwargs))
+        assert len(requests) <= len(responses), "Unexpected extra model request"
+        return responses[len(requests) - 1]
 
     session = SimpleNamespace(
         initialize=AsyncMock(side_effect=initialize),
@@ -39,9 +43,12 @@ def agent_runtime(monkeypatch, sandbox):
     )
     path = str(sandbox["public"] / "document.txt")
     client = SimpleNamespace(chat=AsyncMock(side_effect=chat))
-    client.chat.return_value = response_with_calls([
-        {"function": {"name": "read_file", "arguments": {"path": path}}},
-    ])
+    responses = [
+        response_with_calls([
+            {"function": {"name": "read_file", "arguments": {"path": path}}},
+        ]),
+        response_with_calls(None, "A short summary of the public document."),
+    ]
 
     @asynccontextmanager
     async def transport(parameters):
@@ -78,6 +85,8 @@ def agent_runtime(monkeypatch, sandbox):
         transport_factory=transport_factory,
         session_factory=session_factory,
         gateway_factory=gateway_factory,
+        requests=requests,
+        responses=responses,
     )
 
     assert not state["transport"]
@@ -94,10 +103,12 @@ def response_with_calls(tool_calls, content=""):
     )
 
 
-def read_results(capsys):
-    heading, payload = capsys.readouterr().out.split("\n", 1)
-    assert heading.strip() == "Tool call, through gateway:"
-    return json.loads(payload)
+def tool_results(agent_runtime):
+    messages = agent_runtime.requests[1]["messages"]
+    assert messages[0] == agent_runtime.requests[0]["messages"][0]
+    assert messages[1] == agent_runtime.responses[0].message
+    assert all(message["role"] == "tool" for message in messages[2:])
+    return [json.loads(message["content"]) for message in messages[2:]]
 
 
 async def test_request_describes_read_file_and_targets_clean_document(agent_runtime):
@@ -113,8 +124,8 @@ async def test_request_describes_read_file_and_targets_clean_document(agent_runt
     agent_runtime.session_factory.assert_called_once_with("read-stream", "write-stream")
     agent_runtime.session.initialize.assert_awaited_once()
     agent_runtime.gateway_factory.assert_called_once()
-    agent_runtime.client.chat.assert_awaited_once()
-    request = agent_runtime.client.chat.await_args.kwargs
+    assert agent_runtime.client.chat.await_count == 2
+    request = agent_runtime.requests[0]
     assert request["model"] == "qwen3:1.7b"
     assert request["think"] is False
     assert request["options"] == {"num_ctx": 2048}
@@ -123,7 +134,10 @@ async def test_request_describes_read_file_and_targets_clean_document(agent_runt
     assert request["messages"] == [
         {
             "role": "user",
-            "content": f"Use the read_file tool to read the file at this absolute path: {path}",
+            "content": (
+                f"Read the file at {path} using read_file, "
+                "then summarize its contents in two sentences."
+            ),
         },
     ]
     assert len(request["tools"]) == 1
@@ -144,12 +158,30 @@ async def test_approved_model_call_returns_json_serializable_mcp_result(agent_ru
     agent_runtime.session.call_tool.assert_awaited_once_with(
         "read_file", arguments={"path": agent_runtime.path},
     )
-    result = read_results(capsys)
+    result = tool_results(agent_runtime)
     assert result == [{
         "status": "success",
         "result": agent_runtime.session.call_tool.return_value.model_dump(mode="json"),
         "reason": None,
     }]
+    assert capsys.readouterr().out == "A short summary of the public document.\n"
+
+
+async def test_follow_up_preserves_conversation_order_and_model_settings(agent_runtime):
+    await agent.main()
+
+    initial, follow_up = agent_runtime.requests
+    for setting in ("model", "tools", "think", "options"):
+        assert follow_up[setting] == initial[setting]
+    messages = follow_up["messages"]
+    assert len(initial["messages"]) == 1
+    assert len(messages) == 3
+    assert messages[0]["role"] == "user"
+    assert messages[1].role == "assistant"
+    assert messages[1].tool_calls == agent_runtime.responses[0].message.tool_calls
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["tool_name"] == "read_file"
+    assert json.loads(messages[2]["content"])["status"] == "success"
 
 
 async def test_every_proposed_call_goes_through_gateway_in_order(agent_runtime, capsys):
@@ -157,31 +189,35 @@ async def test_every_proposed_call_goes_through_gateway_in_order(agent_runtime, 
         {"name": "read_file", "arguments": {"path": agent_runtime.path}},
         {"name": "unknown_tool", "arguments": {"value": "inspection only"}},
     ]
-    agent_runtime.client.chat.return_value = response_with_calls([
+    agent_runtime.responses[0] = response_with_calls([
         {"function": proposal} for proposal in proposals
     ])
 
     await agent.main()
 
-    results = read_results(capsys)
+    results = tool_results(agent_runtime)
     assert [result["status"] for result in results] == ["success", "denied"]
     assert results[1]["result"] is None
     agent_runtime.session.call_tool.assert_awaited_once_with(
         "read_file", arguments={"path": agent_runtime.path},
     )
-    agent_runtime.client.chat.assert_awaited_once()
+    assert agent_runtime.client.chat.await_count == 2
+    messages = agent_runtime.requests[1]["messages"]
+    assert [message["tool_name"] for message in messages[2:]] == [
+        "read_file", "unknown_tool",
+    ]
 
 
 @pytest.mark.parametrize("tool_name", ["read_file", "unknown_tool"])
 async def test_denied_model_call_never_invokes_mcp(agent_runtime, capsys, tool_name):
     secret_path = str(agent_runtime.sandbox["secrets"] / "password.txt")
-    agent_runtime.client.chat.return_value = response_with_calls([
+    agent_runtime.responses[0] = response_with_calls([
         {"function": {"name": tool_name, "arguments": {"path": secret_path}}},
     ])
 
     await agent.main()
 
-    result = read_results(capsys)
+    result = tool_results(agent_runtime)
     assert len(result) == 1
     assert result[0]["status"] == "denied"
     assert result[0]["result"] is None
@@ -196,7 +232,7 @@ async def test_mcp_error_result_is_sanitized(agent_runtime, capsys):
 
     await agent.main()
 
-    assert read_results(capsys) == [{
+    assert tool_results(agent_runtime) == [{
         "status": "error", "result": None, "reason": "Tool execution failed.",
     }]
     agent_runtime.session.call_tool.assert_awaited_once()
@@ -207,14 +243,14 @@ async def test_mcp_connection_failure_is_sanitized(agent_runtime, capsys):
 
     await agent.main()
 
-    assert read_results(capsys) == [{
+    assert tool_results(agent_runtime) == [{
         "status": "error", "result": None, "reason": "Tool execution failed.",
     }]
 
 
 @pytest.mark.parametrize("tool_calls", [None, []])
 async def test_reports_text_only_reply_without_calling_mcp(agent_runtime, capsys, tool_calls):
-    agent_runtime.client.chat.return_value = response_with_calls(
+    agent_runtime.responses[0] = response_with_calls(
         tool_calls, "No proposal this time.",
     )
 
@@ -226,7 +262,7 @@ async def test_reports_text_only_reply_without_calling_mcp(agent_runtime, capsys
 
 
 async def test_reports_empty_reply_without_calling_mcp(agent_runtime, capsys):
-    agent_runtime.client.chat.return_value = response_with_calls(None)
+    agent_runtime.responses[0] = response_with_calls(None)
 
     await agent.main()
 
@@ -264,4 +300,44 @@ async def test_mcp_cancellation_propagates_and_closes_connections(agent_runtime,
         await agent.main()
 
     assert capsys.readouterr().out == ""
+    agent_runtime.session.call_tool.assert_awaited_once()
+
+
+async def test_follow_up_tool_request_is_not_executed_or_printed_as_summary(agent_runtime, capsys):
+    agent_runtime.responses[1] = response_with_calls([
+        {"function": {"name": "read_file", "arguments": {"path": agent_runtime.path}}},
+    ], "This is not a final summary.")
+
+    await agent.main()
+
+    assert capsys.readouterr().out == (
+        "The model requested another tool; this example stops here.\n"
+    )
+    assert agent_runtime.client.chat.await_count == 2
+    agent_runtime.session.call_tool.assert_awaited_once()
+
+
+async def test_empty_final_reply_is_reported(agent_runtime, capsys):
+    agent_runtime.responses[1] = response_with_calls(None)
+
+    await agent.main()
+
+    assert capsys.readouterr().out == "The model returned no final answer.\n"
+    assert agent_runtime.client.chat.await_count == 2
+
+
+@pytest.mark.parametrize("error", [ConnectionError("Ollama unavailable"), asyncio.CancelledError()])
+async def test_follow_up_failure_propagates_and_closes_connections(agent_runtime, capsys, error):
+    async def chat(**kwargs):
+        if agent_runtime.client.chat.await_count == 1:
+            return agent_runtime.responses[0]
+        raise error
+
+    agent_runtime.client.chat.side_effect = chat
+
+    with pytest.raises(type(error)):
+        await agent.main()
+
+    assert capsys.readouterr().out == ""
+    assert agent_runtime.client.chat.await_count == 2
     agent_runtime.session.call_tool.assert_awaited_once()

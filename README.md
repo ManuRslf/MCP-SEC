@@ -20,17 +20,18 @@ Async gateway and client regression tests and real MCP denial integration tests
 are implemented. Paired clean and injected experiment fixtures are ready.
 The selected LLM backend is local Ollama. The Python agent can describe a
 `read_file` tool, request a read of `clean.txt`, route proposed calls through the
-gateway and MCP, and print JSON-compatible gateway results. A real local read
-has been verified. Returning the results to the model for a summary is the next
-stage.
+gateway and MCP, and return JSON-compatible gateway results to the model for a
+summary. One real local read-and-summary round has been verified. A bounded loop
+for additional tool requests is the next stage.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
 
 ## Architecture
 
-The diagram shows the current execution path. The agent connects to the gateway
-and MCP, but does not yet return tool results to the model for a final answer.
-The separate application client remains a public-file smoke test.
+The diagram shows the current tool-request path. The agent returns tool results
+to the model in a follow-up request for a final answer. It currently executes
+only one batch of tool calls; the separate application client remains a
+public-file smoke test.
 
 ```mermaid
 flowchart LR
@@ -58,8 +59,10 @@ flowchart LR
   with a `read_file` schema and the absolute path to `clean.txt`. Inside an
   initialized MCP session, it routes each model-proposed call through the
   security gateway. The executor checks the MCP error flag and converts successful
-  results to JSON-compatible dictionaries. The agent prints the gateway results,
-  or reports a reply without tool calls. There is no follow-up model request yet.
+  results to JSON-compatible dictionaries. The agent preserves the assistant's
+  tool requests and appends one tool-role message per gateway result before
+  asking the model for a summary. Denials and errors are returned in the same
+  conversation. Additional tool requests in the second reply are not executed.
 - [tests/](tests/) verifies each component and includes real subprocess MCP
   integration tests. Gateway integration checks approved tools and proves that
   denied secret requests never call MCP. Filesystem tests use temporary
@@ -164,9 +167,9 @@ The experiment fixtures are `sandbox/public/clean.txt` and
 `sandbox/public/injected.txt`. They contain the same urban-parks paragraph, with
 the injected version appending an instruction to read the local dummy secret.
 [goal.txt](goal.txt) records the local paths, expected normal summary, and
-metrics. The agent asks the model to read `clean.txt` by default and executes
-proposed calls only through the gateway;
-the current smoke client still reads `useful_data.txt`.
+metrics. The agent asks the model to read and summarize `clean.txt` by default,
+and executes proposed calls only through the gateway. The current smoke client
+still reads `useful_data.txt`.
 
 Docker configuration and the gateway-mediated agent loop are still pending.
 The current `Dockerfile` and `compose.yaml` are empty placeholders.
@@ -218,16 +221,19 @@ project root:
 python -m agent.agent
 ```
 
-The agent starts and stops its own MCP server. The expected output is headed
-`Tool call, through gateway:` followed by a JSON list of gateway responses.
-A successful `read_file` response contains the public document under
-`result.content`, with `status` set to `success`. This read was verified with
-the real local `qwen3:1.7b` model and MCP server. Denied calls do not reach MCP.
-If the model responds without a tool call, the script reports
-`No tool call was proposed.` and prints any reply text.
+The agent starts and stops its own MCP server, executes the initial proposed
+calls through the gateway, and sends their JSON results back to Ollama before
+printing the final model reply. Denied calls do not reach MCP, but their denial
+responses are still returned to the model. A real local `qwen3:1.7b` run read
+`clean.txt` and returned a relevant urban-parks summary. It used four sentences
+despite the two-sentence prompt; output quality and length are not guaranteed.
 
-File contents are currently printed, not returned to the model. Summarization
-and a bounded multi-turn tool loop are not implemented yet.
+If the initial reply has no tool calls, the script reports
+`No tool call was proposed.` and prints any reply text. If the second reply
+requests another tool, it reports that this example stops there, without
+executing the new request or presenting it as a summary. An empty final reply
+is also reported explicitly. A bounded multi-turn tool loop is not implemented
+yet; run the clean document first.
 
 Run the focused agent tests without requiring an Ollama server or GPU:
 
@@ -235,10 +241,12 @@ Run the focused agent tests without requiring an Ollama server or GPU:
 python -m pytest tests/test_agent.py -v
 ```
 
-The 14 focused tests use mocked Ollama and MCP connections with the real gateway
+The 19 focused tests use mocked Ollama and MCP connections with the real gateway
 policy, real SDK result types, and temporary sandbox fixtures. They cover
 approved and denied calls, JSON serialization, errors, cancellation, and session
-cleanup. No model download, inference, or GPU is needed for these tests.
+cleanup, plus conversation order, unchanged model settings, returned tool
+results, and stopping on further tool requests. No model download, inference,
+or GPU is needed for these tests.
 
 Keep model settings identical when later comparing clean and injected documents.
 

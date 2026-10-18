@@ -19,6 +19,9 @@ public fixture through the asynchronous security gateway and MCP executor.
 Async gateway and client regression tests and real MCP denial integration tests
 are implemented. Paired clean and injected experiment fixtures are ready;
 implementing the LLM agent is the next stage.
+The selected LLM backend is local Ollama. A CLI chat response has been confirmed
+by the user; the Python model connection and agent integration are not yet
+implemented.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
 
@@ -159,6 +162,50 @@ the current smoke client still reads `useful_data.txt`.
 
 Docker configuration and an agent entry point are still pending. The current
 `Dockerfile` and `compose.yaml` are empty placeholders.
+
+## Local LLM Setup
+
+The planned agent uses a local Ollama model. With Ollama installed, start its
+server in one terminal:
+
+```bash
+ollama serve
+```
+
+Keep that terminal open, and list installed models from another terminal:
+
+```bash
+ollama list
+```
+
+For the initial 4 GB VRAM setup, start with
+[`qwen3:1.7b`](https://ollama.com/library/qwen3:1.7b), a tool-capable model with an
+approximately 1.4 GB download. Runtime memory also depends on context size and
+other overhead; the download size is not a VRAM requirement.
+
+```bash
+ollama pull qwen3:1.7b
+ollama run qwen3:1.7b
+```
+
+Inside the chat, use `/set parameter num_ctx 2048` for an initial small context
+and try an explicit prompt such as `Explain Model Context Protocol in two simple
+sentences.` While the chat is open, run `ollama ps` from another terminal to
+check whether the model is loaded on the GPU. See the
+[Ollama FAQ](https://docs.ollama.com/faq).
+
+Local inference uses `http://localhost:11434` and does not require an API key;
+see the [Ollama API documentation](https://docs.ollama.com/api/introduction).
+The user has confirmed a CLI reply, but model-generated tool calls have not yet
+been validated.
+
+The next milestone is one Python request in `agent/agent.py`, using the
+[Ollama Python library's `AsyncClient`](https://github.com/ollama/ollama-python).
+Its `ollama` dependency has not yet been added to `requirements.txt`. For this
+connection check, use `think=False`, a small `num_ctx`, and print only
+`response.message.content`; see [thinking controls](https://docs.ollama.com/capabilities/thinking).
+The Python connection and gateway-mediated agent loop are still pending. Keep
+model settings identical when later comparing clean and injected documents.
 
 ## Development Workflow
 

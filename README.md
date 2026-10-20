@@ -23,7 +23,8 @@ The selected LLM backend is local Ollama. The Python agent can describe a
 gateway and MCP, and return JSON-compatible gateway results to the model for a
 summary. A bounded loop handles additional requests, with at most five model
 turns and ten tool calls. Command-line input selection supports the paired
-documents. A real local clean-document run has been verified; experiment tracing
+documents. Safe terminal diagnostics record tool proposals, gateway outcomes,
+model-response metadata, and termination reasons. Persistent experiment records
 and measured clean/injected comparisons are still pending.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
@@ -66,6 +67,8 @@ flowchart LR
   asking the model again. Denials and errors are returned in the same
   conversation. The loop stops on a reply without tool calls or when its model
   turn or tool-call budget is exhausted. Every executed call uses the gateway.
+  INFO logs include turn/call identifiers, requested paths, returned status, and
+  response-length/token metadata, without copying file or thinking contents.
 - [tests/](tests/) verifies each component and includes real subprocess MCP
   integration tests. Gateway integration checks approved tools and proves that
   denied secret requests never call MCP. Filesystem tests use temporary
@@ -174,8 +177,8 @@ metrics. The agent asks the model to read and summarize `clean.txt` by default,
 or `injected.txt` when selected, and executes proposed calls only through the
 gateway. The current smoke client still reads `useful_data.txt`.
 
-Docker configuration and experiment tracing are still pending. The current
-`Dockerfile` and `compose.yaml` are empty placeholders.
+Docker configuration and persistent experiment records are still pending. The
+current `Dockerfile` and `compose.yaml` are empty placeholders.
 
 ## Local LLM Setup
 
@@ -247,6 +250,27 @@ If the initial reply has no tool calls, the script reports
 `No tool call was proposed.` and prints any reply text. An empty final reply
 after tool execution is also reported explicitly.
 
+The CLI enables INFO logging. `httpx` HTTP 200 messages indicate successful API
+requests, not valid model answers. Gateway `allowed=True` logs are permission
+decisions; the agent's subsequent `event=tool_result status=success` confirms
+execution. Agent diagnostics are written to the logging stream (stderr), while
+the final answer remains on stdout:
+
+| Event | Recorded Metadata |
+| --- | --- |
+| `model_reply` | Turn, answer/thinking character counts, tool-call count, completion reason, token counts |
+| `tool_request` | Turn/call identifier, tool name, requested path |
+| `tool_result` | Matching identifier, tool name, status, sanitized decision reason |
+| `termination` | Final answer, empty reply, or budget exhaustion |
+
+Only lengths and metadata are logged, not model/file contents, complete argument
+dictionaries, or secret values. Agent path/name fields use escaped string
+representations. Proposals rejected by a turn/tool limit are still logged but
+have no executed tool result. An `empty_reply` records a model response without
+answer text or tool calls; it is not a gateway denial. No automatic retry or
+model-setting change is applied, so failures are not silently excluded from
+experiment outcomes.
+
 The loop limits are `MAX_MODEL_TURNS = 5` and `MAX_TOOL_CALLS = 10` in
 `agent/agent.py`. Denied requests count toward the tool-call budget. A batch
 that exceeds the remaining budget is rejected before any of its calls execute.
@@ -262,7 +286,7 @@ Run the focused agent tests without requiring an Ollama server or GPU:
 python -m pytest tests/test_agent.py -v
 ```
 
-The 38 focused tests use mocked Ollama and MCP connections with the real gateway
+The 45 focused tests use mocked Ollama and MCP connections with the real gateway
 policy, real SDK result types, and temporary sandbox fixtures. They cover
 approved and denied calls, JSON serialization, errors, cancellation, and session
 cleanup, plus conversation order, unchanged model settings, returned tool
@@ -272,10 +296,18 @@ to the model; this is not a real model attack-success measurement. No model
 download, inference, or GPU is needed for these tests.
 Input-selection cases also verify the default, both explicit choices, forwarding
 from the CLI to `main`, unchanged task/settings, invalid choices, and help output.
+Diagnostic cases cover empty replies without retries, completion/token metadata,
+safe path/status traces, omitted file/write/thinking contents, budget stops,
+and escaping untrusted path newlines.
 
 Keep model settings identical when later comparing clean and injected documents.
 A normal final summary alone does not show whether the model tried to read a
-secret: intermediate tool-call and gateway-decision tracing is still pending.
+secret: inspect the tool-request and result trace. Two diagnostic injected-input
+replays read only the public file, then returned text incorrectly claiming to
+describe the secret file. Neither proposed a secret read. This is off-task model
+output, not evidence that the secret was accessed. The user's earlier empty
+reply was not reproduced; its precise cause cannot be recovered from the old
+logs alone. Structured run records and leakage metrics are still pending.
 
 ## Development Workflow
 

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import runpy
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -550,3 +551,128 @@ async def test_cli_help_does_not_start_agent(monkeypatch, capsys):
     assert error.value.code == 0
     run.assert_not_called()
     assert "--document {clean,injected}" in capsys.readouterr().out
+
+
+async def test_model_metadata_is_logged_without_answer_content(agent_runtime, caplog):
+    caplog.set_level(logging.INFO, logger=agent.logger.name)
+    answer = "Private model output that must not be copied into logs"
+    agent_runtime.responses[1] = ChatResponse(
+        message={"role": "assistant", "content": answer},
+        done=True,
+        done_reason="stop",
+        prompt_eval_count=548,
+        eval_count=60,
+    )
+
+    await agent.main()
+
+    replies = [
+        record.getMessage() for record in caplog.records
+        if record.name == agent.logger.name and "event=model_reply" in record.getMessage()
+    ]
+    assert len(replies) == 2
+    assert "turn=2" in replies[1]
+    assert f"content_chars={len(answer)}" in replies[1]
+    assert "tool_calls=0 done=True done_reason='stop'" in replies[1]
+    assert "prompt_tokens=548 generated_tokens=60" in replies[1]
+    assert answer not in caplog.text
+
+
+async def test_empty_answer_metadata_is_logged_without_retrying(agent_runtime, caplog, capsys):
+    caplog.set_level(logging.INFO, logger=agent.logger.name)
+    thinking = "Private reasoning text"
+    agent_runtime.responses[1] = ChatResponse(
+        message={"role": "assistant", "content": "", "thinking": thinking},
+        done=True,
+        done_reason="length",
+        prompt_eval_count=2048,
+        eval_count=0,
+    )
+
+    await agent.main()
+
+    assert capsys.readouterr().out == "The model returned no final answer.\n"
+    assert "turn=2 content_chars=0" in caplog.text
+    assert f"thinking_chars={len(thinking)}" in caplog.text
+    assert "done_reason='length' prompt_tokens=2048 generated_tokens=0" in caplog.text
+    assert "event=termination reason=empty_reply turn=2" in caplog.text
+    assert thinking not in caplog.text
+    assert agent_runtime.client.chat.await_count == 2
+
+
+async def test_tool_trace_logs_path_and_status_but_not_file_contents(agent_runtime, caplog):
+    caplog.set_level(logging.INFO, logger=agent.logger.name)
+    contents = "Private file contents must not be logged"
+    agent_runtime.session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text=contents)],
+    )
+
+    await agent.main()
+
+    records = [record.getMessage() for record in caplog.records if record.name == agent.logger.name]
+    request = next(record for record in records if "event=tool_request" in record)
+    result = next(record for record in records if "event=tool_result" in record)
+    assert "turn=1 call=1 tool='read_file'" in request
+    assert f"path={agent_runtime.path!r}" in request
+    assert "turn=1 call=1 tool='read_file' status=success reason=None" in result
+    assert records.index(request) < records.index(result)
+    assert contents not in caplog.text
+
+
+async def test_denied_request_logs_no_write_content(agent_runtime, caplog):
+    caplog.set_level(logging.INFO, logger=agent.logger.name)
+    contents = "Private write content must not be logged"
+    agent_runtime.responses[0] = response_with_calls([
+        {"function": {"name": "write_file", "arguments": {
+            "path": agent_runtime.path, "content": contents,
+        }}},
+    ])
+
+    await agent.main()
+
+    assert "event=tool_request turn=1 call=1 tool='write_file'" in caplog.text
+    assert "tool='write_file' status=denied" in caplog.text
+    assert contents not in caplog.text
+    agent_runtime.session.call_tool.assert_not_called()
+
+
+async def test_tool_budget_stop_logs_unexecuted_proposal(agent_runtime, caplog, monkeypatch):
+    caplog.set_level(logging.INFO, logger=agent.logger.name)
+    monkeypatch.setattr(agent, "MAX_TOOL_CALLS", 0)
+
+    await agent.main()
+
+    assert "event=tool_request turn=1 call=1" in caplog.text
+    assert "event=termination reason=tool_call_limit" in caplog.text
+    assert "event=tool_result" not in caplog.text
+    agent_runtime.session.call_tool.assert_not_called()
+
+
+async def test_model_budget_stop_logs_unexecuted_proposal(agent_runtime, caplog, monkeypatch):
+    caplog.set_level(logging.INFO, logger=agent.logger.name)
+    monkeypatch.setattr(agent, "MAX_MODEL_TURNS", 1)
+
+    await agent.main()
+
+    assert "event=tool_request turn=1 call=1" in caplog.text
+    assert "event=termination reason=model_turn_limit" in caplog.text
+    assert "event=tool_result" not in caplog.text
+    agent_runtime.session.call_tool.assert_not_called()
+
+
+async def test_untrusted_path_newline_is_escaped_in_trace(agent_runtime, caplog):
+    caplog.set_level(logging.INFO, logger=agent.logger.name)
+    path = agent_runtime.path + "\nFAKE LOG LINE"
+    agent_runtime.responses[0] = response_with_calls([
+        {"function": {"name": "read_file", "arguments": {"path": path}}},
+    ])
+
+    await agent.main()
+
+    request = next(
+        record.getMessage() for record in caplog.records
+        if record.name == agent.logger.name and "event=tool_request" in record.getMessage()
+    )
+    assert f"path={path!r}" in request
+    assert "\n" not in request
+    agent_runtime.session.call_tool.assert_not_called()

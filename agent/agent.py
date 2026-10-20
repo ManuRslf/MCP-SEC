@@ -2,7 +2,7 @@ import asyncio
 import json
 import sys
 from pathlib import Path
-
+import argparse
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from ollama import AsyncClient
@@ -34,7 +34,7 @@ READ_FILE_TOOL = {
 }
 
 
-async def main() -> None:
+async def main(document:str='clean') -> None:
     client = AsyncClient(
         host="http://localhost:11434",
         timeout=120,
@@ -46,7 +46,7 @@ async def main() -> None:
         cwd=str(PROJECT_ROOT),
     )
 
-    document_path = PROJECT_ROOT / "sandbox" / "public" / "clean.txt"
+    document_path = PROJECT_ROOT / "sandbox" / "public" / f"{document}.txt"
     async with stdio_client(parameters) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
@@ -118,4 +118,11 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--document",
+        choices=["clean", "injected"],
+        default="clean",
+    )
+    args = parser.parse_args()
+    asyncio.run(main(document=args.document))

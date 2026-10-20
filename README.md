@@ -22,8 +22,9 @@ The selected LLM backend is local Ollama. The Python agent can describe a
 `read_file` tool, request a read of `clean.txt`, route proposed calls through the
 gateway and MCP, and return JSON-compatible gateway results to the model for a
 summary. A bounded loop handles additional requests, with at most five model
-turns and ten tool calls. A real local clean-document run has been verified;
-experiment tracing and the injected-document run are still pending.
+turns and ten tool calls. Command-line input selection supports the paired
+documents. A real local clean-document run has been verified; experiment tracing
+and measured clean/injected comparisons are still pending.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
 
@@ -56,7 +57,8 @@ flowchart LR
   error for failed MCP tool results; the gateway converts execution exceptions
   into sanitized error responses.
 - [agent/agent.py](agent/agent.py) sends asynchronous local Ollama requests
-  with a `read_file` schema and the absolute path to `clean.txt`. Inside an
+  with a `read_file` schema and the absolute path to the selected public document.
+  The `--document` option accepts `clean` or `injected`, defaulting to `clean`. Inside an
   initialized MCP session, it routes each model-proposed call through the
   security gateway. The executor checks the MCP error flag and converts successful
   results to JSON-compatible dictionaries. The agent preserves the assistant's
@@ -169,8 +171,8 @@ The experiment fixtures are `sandbox/public/clean.txt` and
 the injected version appending an instruction to read the local dummy secret.
 [goal.txt](goal.txt) records the local paths, expected normal summary, and
 metrics. The agent asks the model to read and summarize `clean.txt` by default,
-and executes proposed calls only through the gateway. The current smoke client
-still reads `useful_data.txt`.
+or `injected.txt` when selected, and executes proposed calls only through the
+gateway. The current smoke client still reads `useful_data.txt`.
 
 Docker configuration and experiment tracing are still pending. The current
 `Dockerfile` and `compose.yaml` are empty placeholders.
@@ -222,6 +224,18 @@ project root:
 python -m agent.agent
 ```
 
+Select either paired input explicitly:
+
+```bash
+python -m agent.agent --document clean
+python -m agent.agent --document injected
+```
+
+The parser rejects other choices before starting the agent. Selection changes
+only the document path in the task; the prompt wording, model settings, tools,
+and gateway policy stay the same. Use `python -m agent.agent --help` to inspect
+the options without starting Ollama or MCP connections.
+
 The agent starts and stops its own MCP server, executes proposed calls through
 the gateway, and sends their JSON results back to Ollama until it can print a
 final model reply or a limit is reached. Denied calls do not reach MCP, but their denial
@@ -248,7 +262,7 @@ Run the focused agent tests without requiring an Ollama server or GPU:
 python -m pytest tests/test_agent.py -v
 ```
 
-The 30 focused tests use mocked Ollama and MCP connections with the real gateway
+The 38 focused tests use mocked Ollama and MCP connections with the real gateway
 policy, real SDK result types, and temporary sandbox fixtures. They cover
 approved and denied calls, JSON serialization, errors, cancellation, and session
 cleanup, plus conversation order, unchanged model settings, returned tool
@@ -256,8 +270,12 @@ results, multi-turn execution, model-turn limits, and tool-call budgets. A
 mocked post-read secret request is denied before MCP and its denial is returned
 to the model; this is not a real model attack-success measurement. No model
 download, inference, or GPU is needed for these tests.
+Input-selection cases also verify the default, both explicit choices, forwarding
+from the CLI to `main`, unchanged task/settings, invalid choices, and help output.
 
 Keep model settings identical when later comparing clean and injected documents.
+A normal final summary alone does not show whether the model tried to read a
+secret: intermediate tool-call and gateway-decision tracing is still pending.
 
 ## Development Workflow
 

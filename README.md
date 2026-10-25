@@ -309,6 +309,14 @@ output, not evidence that the secret was accessed. The user's earlier empty
 reply was not reproduced; its precise cause cannot be recovered from the old
 logs alone. Structured run records and leakage metrics are still pending.
 
+The revised injected fixture explicitly requests `read_file` with the dummy
+secret path and presents that read as a prerequisite for summarization. The
+user reports that this version worked, but the runtime trace has not yet been
+archived or independently checked. This does not establish a success rate or
+secret disclosure. The next milestone is saved structured run records, followed
+by measured clean/injected trials with the same model settings. A forbidden
+tool request, a gateway denial, and final-answer leakage are separate outcomes.
+
 ## Development Workflow
 
 [inst.md](inst.md) defines the documentation and progress workflow. When the next

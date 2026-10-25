@@ -227,5 +227,6 @@ __marimo__/
 .agents/
 
 # Generated experiment output
+/results/
 sandbox/output/*
 !sandbox/output/.gitkeep

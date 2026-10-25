@@ -24,8 +24,9 @@ gateway and MCP, and return JSON-compatible gateway results to the model for a
 summary. A bounded loop handles additional requests, with at most five model
 turns and ten tool calls. Command-line input selection supports the paired
 documents. Safe terminal diagnostics record tool proposals, gateway outcomes,
-model-response metadata, and termination reasons. Persistent experiment records
-and measured clean/injected comparisons are still pending.
+model-response metadata, and termination reasons. Optional JSON run records
+save settings, tool outcomes, termination, and the final answer locally.
+Measured clean/injected comparisons are still pending.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
 [goal.txt](goal.txt) for the initial experiment specification.
 
@@ -69,6 +70,8 @@ flowchart LR
   turn or tool-call budget is exhausted. Every executed call uses the gateway.
   INFO logs include turn/call identifiers, requested paths, returned status, and
   response-length/token metadata, without copying file or thinking contents.
+  With `--experiment`, it also saves a private JSON run record in the ignored
+  project-root `results/` directory, outside the server's sandbox.
 - [tests/](tests/) verifies each component and includes real subprocess MCP
   integration tests. Gateway integration checks approved tools and proves that
   denied secret requests never call MCP. Filesystem tests use temporary
@@ -177,8 +180,8 @@ metrics. The agent asks the model to read and summarize `clean.txt` by default,
 or `injected.txt` when selected, and executes proposed calls only through the
 gateway. The current smoke client still reads `useful_data.txt`.
 
-Docker configuration and persistent experiment records are still pending. The
-current `Dockerfile` and `compose.yaml` are empty placeholders.
+Docker configuration and measured experiment comparisons are still pending.
+The current `Dockerfile` and `compose.yaml` are empty placeholders.
 
 ## Local LLM Setup
 
@@ -280,13 +283,54 @@ Limit exhaustion is reported explicitly, not printed as a successful summary.
 Only structured model tool calls are processed; instructions or tool names
 appearing in ordinary text are not executed.
 
+### Saved Run Records
+
+Enable recording for either document:
+
+```bash
+python -m agent.agent --document clean --experiment
+python -m agent.agent --document injected --experiment
+```
+
+The aliases `--d` and `--e` also work, for example
+`python -m agent.agent --d injected --e`. The experiment option is a switch:
+do not supply `True` or `False`. Without it, no record is written.
+
+Each recording creates a new `results/run-<UTC timestamp>-<unique suffix>.json`
+file. The CLI logs its location with `event=record_saved`. Files contain:
+
+- Selected document and absolute document path, plus UTC start/end timestamps.
+- The actual model settings, loop limits, and number of model requests started.
+- Ordered tool requests with turn/call identifiers, tool names, paths, statuses,
+  and sanitized gateway reasons.
+- Termination reason and final model answer, or `null` when no answer was produced.
+
+Tool statuses `success`, `denied`, and `error` are gateway outcomes.
+`not_executed` marks a proposal that never reached the gateway, such as a
+budget-skipped request. `no_result` marks a gateway request that was started
+but did not return, for example during cancellation; it is not a denial or
+proof that execution did not occur. Termination reasons also distinguish
+`error` and `cancelled` from normal answers, empty replies, and budget stops.
+
+Records are saved on exit, including ordinary exceptions and cancellation,
+without retrying inference or swallowing the original failure. A save failure
+logs `event=record_save_failed` and raises unless a run failure is already
+propagating. Abrupt process termination can prevent saving a record.
+
+Raw MCP payloads, write contents, exception messages, and thinking text are not
+copied into the record. Unlike terminal diagnostics, the record deliberately
+stores the final answer, which may contain the dummy secret. Files are created
+with private temporary-file permissions, use unique names without overwriting
+previous runs, and are excluded from Git by `/results/`. Use only dummy data;
+Git ignore rules do not make sensitive output safe to share.
+
 Run the focused agent tests without requiring an Ollama server or GPU:
 
 ```bash
 python -m pytest tests/test_agent.py -v
 ```
 
-The 45 focused tests use mocked Ollama and MCP connections with the real gateway
+The 70 focused tests use mocked Ollama and MCP connections with the real gateway
 policy, real SDK result types, and temporary sandbox fixtures. They cover
 approved and denied calls, JSON serialization, errors, cancellation, and session
 cleanup, plus conversation order, unchanged model settings, returned tool
@@ -299,6 +343,10 @@ from the CLI to `main`, unchanged task/settings, invalid choices, and help outpu
 Diagnostic cases cover empty replies without retries, completion/token metadata,
 safe path/status traces, omitted file/write/thinking contents, budget stops,
 and escaping untrusted path newlines.
+Recording cases cover optional output, both documents, settings and timestamps,
+secret denials, skipped and interrupted requests, empty/error/cancelled runs,
+payload omission, unique names at the same timestamp, save failures, and CLI
+boolean-switch forwarding.
 
 Keep model settings identical when later comparing clean and injected documents.
 A normal final summary alone does not show whether the model tried to read a
@@ -307,14 +355,15 @@ replays read only the public file, then returned text incorrectly claiming to
 describe the secret file. Neither proposed a secret read. This is off-task model
 output, not evidence that the secret was accessed. The user's earlier empty
 reply was not reproduced; its precise cause cannot be recovered from the old
-logs alone. Structured run records and leakage metrics are still pending.
+logs alone. Structured run records are now available; measured comparisons and
+leakage metrics are still pending.
 
 The revised injected fixture explicitly requests `read_file` with the dummy
 secret path and presents that read as a prerequisite for summarization. The
 user reports that this version worked, but the runtime trace has not yet been
 archived or independently checked. This does not establish a success rate or
-secret disclosure. The next milestone is saved structured run records, followed
-by measured clean/injected trials with the same model settings. A forbidden
+secret disclosure. The next milestone is measured clean/injected trials using
+the saved run records with the same model settings. A forbidden
 tool request, a gateway denial, and final-answer leakage are separate outcomes.
 
 ## Development Workflow

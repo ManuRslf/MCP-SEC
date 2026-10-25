@@ -4,6 +4,7 @@ import logging
 import runpy
 from contextlib import asynccontextmanager
 from copy import deepcopy
+from datetime import datetime, timezone
 from inspect import getcoroutinelocals
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -507,25 +508,32 @@ async def test_selected_document_changes_only_the_prompt_path(agent_runtime, doc
         assert request["options"] == {"num_ctx": 2048}
 
 
-@pytest.mark.parametrize("arguments, expected_document", [
-    ([], "clean"),
-    (["--document", "clean"], "clean"),
-    (["--document", "injected"], "injected"),
+@pytest.mark.parametrize("arguments, expected_document, expected_experiment", [
+    ([], "clean", False),
+    (["--document", "clean"], "clean", False),
+    (["--document", "injected"], "injected", False),
+    (["--d", "injected"], "injected", False),
+    (["--experiment"], "clean", True),
+    (["--document", "injected", "--experiment"], "injected", True),
+    (["--d", "injected", "--e"], "injected", True),
 ])
-async def test_cli_passes_document_choice_to_main(monkeypatch, arguments, expected_document):
-    documents = []
+async def test_cli_passes_choices_to_main(
+    monkeypatch, arguments, expected_document, expected_experiment,
+):
+    choices = []
 
-    def capture_document(coroutine):
+    def capture_choices(coroutine):
         try:
-            documents.append(getcoroutinelocals(coroutine)["document"])
+            arguments = getcoroutinelocals(coroutine)
+            choices.append((arguments["document"], arguments["experiment"]))
         finally:
             coroutine.close()
 
     monkeypatch.setattr(agent.sys, "argv", ["agent.agent", *arguments])
-    with patch("asyncio.run", side_effect=capture_document):
+    with patch("asyncio.run", side_effect=capture_choices):
         runpy.run_path(agent.__file__, run_name="__main__")
 
-    assert documents == [expected_document]
+    assert choices == [(expected_document, expected_experiment)]
 
 
 @pytest.mark.parametrize("document", ["missing", "../secrets/password"])
@@ -550,7 +558,9 @@ async def test_cli_help_does_not_start_agent(monkeypatch, capsys):
 
     assert error.value.code == 0
     run.assert_not_called()
-    assert "--document {clean,injected}" in capsys.readouterr().out
+    help_text = capsys.readouterr().out
+    assert "--document {clean,injected}" in help_text
+    assert "--experiment" in help_text
 
 
 async def test_model_metadata_is_logged_without_answer_content(agent_runtime, caplog):
@@ -676,3 +686,228 @@ async def test_untrusted_path_newline_is_escaped_in_trace(agent_runtime, caplog)
     assert f"path={path!r}" in request
     assert "\n" not in request
     agent_runtime.session.call_tool.assert_not_called()
+
+
+@pytest.fixture
+def record_directory(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent, "PROJECT_ROOT", tmp_path)
+    return tmp_path / "results"
+
+
+def load_record(record_directory):
+    files = list(record_directory.glob("*.json"))
+    assert len(files) == 1
+    return json.loads(files[0].read_text(encoding="utf-8"))
+
+
+async def test_recording_is_disabled_by_default(agent_runtime, record_directory):
+    await agent.main()
+
+    assert not record_directory.exists()
+
+
+@pytest.mark.parametrize("document", ["clean", "injected"])
+async def test_experiment_saves_settings_calls_and_answer(
+    agent_runtime, record_directory, document, capsys, caplog,
+):
+    caplog.set_level(logging.INFO, logger=agent.logger.name)
+    private_content = "Raw tool content not for the record"
+    private_thinking = "Private model thinking not for the record"
+    agent_runtime.session.call_tool.return_value = CallToolResult(
+        content=[TextContent(type="text", text=private_content)],
+    )
+    agent_runtime.responses[0].message.thinking = private_thinking
+
+    await agent.main(document=document, experiment=True)
+
+    record = load_record(record_directory)
+    assert record["document"] == document
+    assert record["document_path"] == str(
+        agent.PROJECT_ROOT / "sandbox" / "public" / f"{document}.txt"
+    )
+    assert record["model_settings"] == {
+        key: agent_runtime.requests[0][key] for key in ("model", "think", "options")
+    }
+    assert record["limits"] == {"model_turns": 5, "tool_calls": 10}
+    assert record["model_turns"] == 2
+    assert record["tool_calls"] == [{
+        "turn": 1, "call": 1, "tool": "read_file", "path": agent_runtime.path,
+        "status": "success", "reason": None,
+    }]
+    assert record["termination_reason"] == "final_answer"
+    assert record["final_answer"] == agent_runtime.responses[1].message.content
+    started = datetime.fromisoformat(record["started_at"])
+    finished = datetime.fromisoformat(record["finished_at"])
+    assert started.tzinfo == timezone.utc
+    assert finished >= started
+    assert private_content not in json.dumps(record)
+    assert private_thinking not in json.dumps(record)
+    assert capsys.readouterr().out == "A short summary of the public document.\n"
+    assert "event=record_saved" in caplog.text
+    assert str(record_directory) in caplog.text
+
+
+async def test_record_keeps_public_success_and_secret_denial_separate(
+    agent_runtime, record_directory,
+):
+    secret_path = str(agent_runtime.sandbox["secrets"] / "password.txt")
+    agent_runtime.responses[1] = response_with_calls([
+        {"function": {"name": "read_file", "arguments": {"path": secret_path}}},
+    ])
+    agent_runtime.responses.append(response_with_calls(None, "Access was denied."))
+
+    await agent.main(document="injected", experiment=True)
+
+    record = load_record(record_directory)
+    assert record["model_turns"] == 3
+    assert [call["status"] for call in record["tool_calls"]] == ["success", "denied"]
+    assert [call["turn"] for call in record["tool_calls"]] == [1, 2]
+    assert [call["call"] for call in record["tool_calls"]] == [1, 2]
+    assert record["tool_calls"][1]["path"] == secret_path
+    assert record["tool_calls"][1]["reason"]
+    assert record["termination_reason"] == "final_answer"
+    agent_runtime.session.call_tool.assert_awaited_once()
+
+
+@pytest.mark.parametrize("content, reply_index, reason", [
+    ("Answer without a call", 0, "answer_without_tools"),
+    ("", 0, "empty_reply"),
+    ("", 1, "empty_reply"),
+])
+async def test_record_saves_text_only_and_empty_outcomes(
+    agent_runtime, record_directory, content, reply_index, reason,
+):
+    agent_runtime.responses[reply_index] = response_with_calls(None, content)
+
+    await agent.main(experiment=True)
+
+    record = load_record(record_directory)
+    assert record["termination_reason"] == reason
+    assert record["final_answer"] == (content or None)
+    assert record["model_turns"] == reply_index + 1
+    assert len(record["tool_calls"]) == reply_index
+
+
+@pytest.mark.parametrize("limit, value, reason", [
+    ("MAX_MODEL_TURNS", 1, "model_turn_limit"),
+    ("MAX_TOOL_CALLS", 0, "tool_call_limit"),
+])
+async def test_record_distinguishes_budget_skips_from_gateway_denials(
+    agent_runtime, record_directory, monkeypatch, limit, value, reason,
+):
+    monkeypatch.setattr(agent, limit, value)
+
+    await agent.main(experiment=True)
+
+    record = load_record(record_directory)
+    assert record["termination_reason"] == reason
+    assert record["final_answer"] is None
+    assert record["tool_calls"][0]["status"] == "not_executed"
+    assert record["tool_calls"][0]["reason"] is None
+    agent_runtime.session.call_tool.assert_not_called()
+
+
+async def test_record_omits_sensitive_error_and_write_payloads(agent_runtime, record_directory):
+    sensitive = "Sensitive exception details and write payload"
+    agent_runtime.session.call_tool.side_effect = RuntimeError(sensitive)
+    agent_runtime.responses[0].message.tool_calls.append(
+        response_with_calls([{
+            "function": {"name": "write_file", "arguments": {
+                "path": agent_runtime.path, "content": sensitive,
+            }},
+        }]).message.tool_calls[0],
+    )
+
+    await agent.main(experiment=True)
+
+    record = load_record(record_directory)
+    assert [call["status"] for call in record["tool_calls"]] == ["error", "denied"]
+    assert record["tool_calls"][0]["reason"] == "Tool execution failed."
+    assert sensitive not in json.dumps(record)
+
+
+@pytest.mark.parametrize("stage, error, reason", [
+    ("initialize", RuntimeError("Private initialization details"), "error"),
+    ("initial", ConnectionError("Private connection details"), "error"),
+    ("follow_up", ConnectionError("Private follow-up details"), "error"),
+    ("initial", asyncio.CancelledError(), "cancelled"),
+    ("tool", asyncio.CancelledError(), "cancelled"),
+])
+async def test_record_survives_errors_and_cancellation(
+    agent_runtime, record_directory, stage, error, reason,
+):
+    if stage == "initialize":
+        agent_runtime.session.initialize.side_effect = error
+    elif stage == "tool":
+        agent_runtime.session.call_tool.side_effect = error
+    elif stage == "follow_up":
+        agent_runtime.client.chat.side_effect = [agent_runtime.responses[0], error]
+    else:
+        agent_runtime.client.chat.side_effect = error
+
+    with pytest.raises(type(error)) as raised:
+        await agent.main(experiment=True)
+
+    assert raised.value is error
+    record = load_record(record_directory)
+    assert record["termination_reason"] == reason
+    assert record["final_answer"] is None
+    if stage == "tool":
+        assert record["tool_calls"][0]["status"] == "no_result"
+    if str(error):
+        assert str(error) not in json.dumps(record)
+
+
+async def test_same_timestamp_runs_do_not_overwrite_records(
+    agent_runtime, record_directory, monkeypatch,
+):
+    instant = datetime(2026, 10, 25, tzinfo=timezone.utc)
+    monkeypatch.setattr(agent, "datetime", SimpleNamespace(now=lambda tz: instant))
+    agent_runtime.responses.extend(agent_runtime.responses[:])
+
+    await agent.main(experiment=True)
+    await agent.main(experiment=True)
+
+    files = list(record_directory.glob("*.json"))
+    assert len(files) == 2
+    for path in files:
+        assert ":" not in path.name
+        assert json.loads(path.read_text(encoding="utf-8"))["started_at"] == instant.isoformat()
+
+
+async def test_record_save_failure_is_not_silently_ignored(agent_runtime, record_directory, caplog):
+    record_directory.write_text("Existing data", encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        await agent.main(experiment=True)
+
+    assert record_directory.read_text(encoding="utf-8") == "Existing data"
+    assert "event=record_save_failed" in caplog.text
+
+
+@pytest.mark.parametrize("error", [ConnectionError("Original error"), asyncio.CancelledError()])
+async def test_record_save_failure_does_not_replace_run_failure(
+    agent_runtime, record_directory, caplog, error,
+):
+    record_directory.write_text("Existing data", encoding="utf-8")
+    agent_runtime.client.chat.side_effect = error
+
+    with pytest.raises(type(error)) as raised:
+        await agent.main(experiment=True)
+
+    assert raised.value is error
+    assert record_directory.read_text(encoding="utf-8") == "Existing data"
+    assert "event=record_save_failed" in caplog.text
+
+
+@pytest.mark.parametrize("flag", ["--experiment", "--e"])
+async def test_experiment_switch_does_not_accept_a_boolean_string(monkeypatch, capsys, flag):
+    monkeypatch.setattr(agent.sys, "argv", ["agent.agent", flag, "False"])
+
+    with patch("asyncio.run") as run:
+        with pytest.raises(SystemExit) as error:
+            runpy.run_path(agent.__file__, run_name="__main__")
+
+    assert error.value.code == 2
+    run.assert_not_called()
+    assert "unrecognized arguments: False" in capsys.readouterr().err

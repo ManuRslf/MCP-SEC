@@ -23,8 +23,8 @@ The selected LLM backend is local Ollama. The Python agent can describe a
 gateway and MCP, and return JSON-compatible gateway results to the model for a
 summary. A bounded loop handles additional requests, with at most five model
 turns and ten tool calls. Command-line input selection supports the paired
-documents. Safe terminal diagnostics record tool proposals, gateway outcomes,
-model-response metadata, and termination reasons. Optional JSON run records
+documents. Concise terminal logs show tool paths and gateway outcomes.
+Optional JSON run records
 save settings, tool outcomes, termination, and the final answer locally.
 Measured clean/injected comparisons are still pending.
 See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
@@ -68,8 +68,9 @@ flowchart LR
   asking the model again. Denials and errors are returned in the same
   conversation. The loop stops on a reply without tool calls or when its model
   turn or tool-call budget is exhausted. Every executed call uses the gateway.
-  INFO logs include turn/call identifiers, requested paths, returned status, and
-  response-length/token metadata, without copying file or thinking contents.
+  `main()` manages connections and cleanup, `run_agent()` runs the conversation,
+  and `save_record()` writes the optional JSON output. One INFO line per completed
+  gateway request includes its path and outcome, without file or thinking contents.
   With `--experiment`, it also saves a private JSON run record in the ignored
   project-root `results/` directory, outside the server's sandbox.
 - [tests/](tests/) verifies each component and includes real subprocess MCP
@@ -253,26 +254,25 @@ If the initial reply has no tool calls, the script reports
 `No tool call was proposed.` and prints any reply text. An empty final reply
 after tool execution is also reported explicitly.
 
-The CLI enables INFO logging. `httpx` HTTP 200 messages indicate successful API
-requests, not valid model answers. Gateway `allowed=True` logs are permission
-decisions; the agent's subsequent `event=tool_result status=success` confirms
-execution. Agent diagnostics are written to the logging stream (stderr), while
-the final answer remains on stdout:
+The CLI enables INFO logging only for the agent; other loggers default to WARNING
+or higher. Routine HTTP messages and duplicate gateway permission logs are hidden.
+Each completed gateway request produces one `tool_result` line with its path,
+status, and reason. `status=success` confirms execution; `status=denied` means the
+gateway rejected the request. Logs go to stderr; the final answer stays on stdout:
 
 | Event | Recorded Metadata |
 | --- | --- |
-| `model_reply` | Turn, answer/thinking character counts, tool-call count, completion reason, token counts |
-| `tool_request` | Turn/call identifier, tool name, requested path |
-| `tool_result` | Matching identifier, tool name, status, sanitized decision reason |
-| `termination` | Final answer, empty reply, or budget exhaustion |
+| `tool_result` | Turn/call identifier, tool name, path, status, sanitized reason |
+| `record_saved` | Saved JSON file path |
+| `record_save_failed` | Record could not be saved |
 
-Only lengths and metadata are logged, not model/file contents, complete argument
-dictionaries, or secret values. Agent path/name fields use escaped string
-representations. Proposals rejected by a turn/tool limit are still logged but
-have no executed tool result. An `empty_reply` records a model response without
-answer text or tool calls; it is not a gateway denial. No automatic retry or
-model-setting change is applied, so failures are not silently excluded from
-experiment outcomes.
+Model/file contents, complete argument dictionaries, and secret values are not
+logged. Path/name fields use escaped string representations. Verbose model/token
+metadata, separate proposal logs, and duplicate termination logs are omitted.
+Skipped or interrupted proposals remain in JSON records when `--experiment` is
+enabled. Empty replies and budget exhaustion still produce explicit CLI output
+and recorded termination reasons. An empty reply is not a gateway denial; no
+automatic retry or model-setting change is applied.
 
 The loop limits are `MAX_MODEL_TURNS = 5` and `MAX_TOOL_CALLS = 10` in
 `agent/agent.py`. Denied requests count toward the tool-call budget. A batch
@@ -340,9 +340,9 @@ to the model; this is not a real model attack-success measurement. No model
 download, inference, or GPU is needed for these tests.
 Input-selection cases also verify the default, both explicit choices, forwarding
 from the CLI to `main`, unchanged task/settings, invalid choices, and help output.
-Diagnostic cases cover empty replies without retries, completion/token metadata,
-safe path/status traces, omitted file/write/thinking contents, budget stops,
-and escaping untrusted path newlines.
+Diagnostic cases cover concise tool-outcome lines, quiet default logging,
+omission of verbose model/termination logs and private contents, empty replies
+without retries, budget stops, and escaping untrusted path newlines.
 Recording cases cover optional output, both documents, settings and timestamps,
 secret denials, skipped and interrupted requests, empty/error/cancelled runs,
 payload omission, unique names at the same timestamp, save failures, and CLI

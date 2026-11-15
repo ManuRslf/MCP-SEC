@@ -80,6 +80,22 @@ only the reviewed branch, use a checked lease, and avoid a blanket mirror push.
 Other clones and cached copies may retain old metadata after rewriting; see
 [GitHub's sensitive-data removal guidance](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository).
 
+## Cleaned-Candidate Results
+
+The separate candidate was verified against all 24 commits present at cleanup.
+All 20 protected current file paths and every historical source/fixture blob
+match the original committed versions. Commit messages and timestamps are
+unchanged. The removed assistant files are absent from every candidate tree;
+the old private name/email and original private commit objects are absent from
+all candidate Git objects, not only from the visible log. The candidate has no
+configured remote and passes the same 256 tests. Its history scan reported no
+credential matches.
+
+One original GitHub-signed commit lost its signature during rewriting. Rewritten
+history must not be presented as carrying the old verified signatures. The
+private handoff includes the original bundle, identity mapping, source manifests,
+scan reports, and verification summary; none belongs in the public repository.
+
 ## Verification and Existing Limitations
 
 - All 256 existing tests passed on 2026-11-15 using Python 3.13.12, MCP SDK 2.3.0,

@@ -57,8 +57,8 @@ Dependencies are listed in [`requirements.txt`](requirements.txt); they are not
 fully version-locked. The current model backend is Ollama, not the OpenAI API.
 
 ```bash
-git clone https://github.com/ManuRslf/MCP-security.git
-cd MCP-security
+git clone https://github.com/ManuRslf/MCP-SEC.git
+cd MCP-SEC
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt

@@ -19,6 +19,8 @@ MAX_MODEL_TURNS = 5
 MAX_TOOL_CALLS = 10
 logger = logging.getLogger(__name__)
 
+
+# Read file 
 READ_FILE_TOOL = {
     "type": "function",
     "function": {
@@ -40,6 +42,7 @@ READ_FILE_TOOL = {
 
 
 async def run_agent(client: AsyncClient, gateway: SecurityGateway, record: dict) -> None:
+    
     messages = [{
         "role": "user",
         "content": (
@@ -159,6 +162,7 @@ async def main(document: str = "clean", experiment: bool = False) -> None:
         "final_answer": None,
     }
     try:
+        # Init the client then run the agent with a limited usage of tools
         client = AsyncClient(host="http://localhost:11434", timeout=120)
         parameters = StdioServerParameters(
             command=sys.executable,

@@ -3,6 +3,11 @@ from collections.abc import Callable, Awaitable
 from .policy import authorize
 
 
+
+'''
+EVERY TOOL CALL WILL BE VERIFIED FIRST THEN IF APPROVED CAN RAN THE TOOL THROUGH AN EXECUTOR
+'''
+
 class SecurityGateway:
     def __init__(self,
                  executor: Callable[[str, dict], Awaitable[object]],

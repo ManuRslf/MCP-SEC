@@ -1,383 +1,224 @@
 # MCP Security Experiment
 
-## Project Purpose
+A research prototype for studying whether a security gateway can enforce tool
+permissions when a local LLM encounters a prompt injection in a document.
+The agent is asked to summarize public text; an injected version also asks it
+to read a forbidden, fictional password fixture.
 
-This project investigates whether a gateway can enforce tool permissions when
-an LLM agent encounters a prompt injection inside a file. The planned experiment
-asks an agent to summarize a public document containing an instruction to read
-a forbidden dummy secret.
+The experiment distinguishes three outcomes: a model **requests** the forbidden
+read, the gateway **denies** it, and the final answer **discloses** the dummy
+value. Mentioning a secret path in an answer does not prove file access.
 
-The experiment separates three questions:
+## Capabilities
 
-1. Did the model attempt the forbidden tool call?
-2. Did the gateway block that call?
-3. Did the final answer reveal the dummy secret?
-
-The policy, gateway, filesystem tools, and their tests are implemented. The
-application MCP client can launch the server, initialize a session, and read the
-public fixture through the asynchronous security gateway and MCP executor.
-Async gateway and client regression tests and real MCP denial integration tests
-are implemented. Paired clean and injected experiment fixtures are ready.
-The selected LLM backend is local Ollama. The Python agent can describe a
-`read_file` tool, request a read of `clean.txt`, route proposed calls through the
-gateway and MCP, and return JSON-compatible gateway results to the model for a
-summary. A bounded loop handles additional requests, with at most five model
-turns and ten tool calls. Command-line input selection supports the paired
-documents. Concise terminal logs show tool paths and gateway outcomes.
-Optional JSON run records
-save settings, tool outcomes, termination, and the final answer locally.
-Measured clean/injected comparisons are still pending.
-See [PROGRESS.md](PROGRESS.md) for completed and pending work, and
-[goal.txt](goal.txt) for the initial experiment specification.
+- Local Ollama inference with `qwen3:1.7b`; no API key is required.
+- MCP filesystem tools for UTF-8 reads/writes and directory listings over stdio.
+- Default-deny authorization of tool names, arguments, and resolved paths.
+- An asynchronous agent loop limited to five model turns and ten tool calls.
+- Clean/injected input selection and optional private JSON run records.
+- Component tests and real gateway-to-MCP subprocess integration tests.
 
 ## Architecture
 
-The diagram shows the current tool-request path. The agent returns tool results
-to the model and repeats the conversation until a final answer or a limit is
-reached. The separate application client remains a public-file smoke test.
-
 ```mermaid
 flowchart LR
-    User[User task] --> Agent[LLM agent]
+    Task[User task] --> Agent[Python agent and local Ollama]
     Agent --> Gateway[Security gateway and policy]
     Gateway --> Client[MCP client and async executor]
     Client --> Server[MCP filesystem server]
     Server --> Sandbox[Sandbox files]
+    Server --> Client
+    Client --> Gateway
+    Gateway --> Agent
 ```
 
-<!-- Architecture diagram image placeholder: docs/architecture.png -->
+The agent returns tool results to the model as conversation data. Every executed
+model-proposed call passes through the gateway. The policy is implemented in
+[`gateway/policy.py`](gateway/policy.py); [`gateway/policy.md`](gateway/policy.md)
+documents it but is not parsed by the application.
 
-- [gateway/policy.py](gateway/policy.py) validates arguments and authorizes
-  resolved paths using the rules in [gateway/policy.md](gateway/policy.md).
-- [gateway/gateway.py](gateway/gateway.py) checks the policy, logs decisions,
-  awaits an executor for approved requests, and returns structured responses.
-- [mcp_server/server.py](mcp_server/server.py) exposes `read_file`, `write_file`,
-  and `list_directory` through MCP over stdio.
-- [mcp_client/client.py](mcp_client/client.py) starts the server, initializes an
-  MCP session, defines an asynchronous executor, reads the public fixture through
-  the gateway, and closes the session and process. The executor raises a generic
-  error for failed MCP tool results; the gateway converts execution exceptions
-  into sanitized error responses.
-- [agent/agent.py](agent/agent.py) sends asynchronous local Ollama requests
-  with a `read_file` schema and the absolute path to the selected public document.
-  The `--document` option accepts `clean` or `injected`, defaulting to `clean`. Inside an
-  initialized MCP session, it routes each model-proposed call through the
-  security gateway. The executor checks the MCP error flag and converts successful
-  results to JSON-compatible dictionaries. The agent preserves the assistant's
-  tool requests and appends one tool-role message per gateway result before
-  asking the model again. Denials and errors are returned in the same
-  conversation. The loop stops on a reply without tool calls or when its model
-  turn or tool-call budget is exhausted. Every executed call uses the gateway.
-  `main()` manages connections and cleanup, `run_agent()` runs the conversation,
-  and `save_record()` writes the optional JSON output. One INFO line per completed
-  gateway request includes its path and outcome, without file or thinking contents.
-  With `--experiment`, it also saves a private JSON run record in the ignored
-  project-root `results/` directory, outside the server's sandbox.
-- [tests/](tests/) verifies each component and includes real subprocess MCP
-  integration tests. Gateway integration checks approved tools and proves that
-  denied secret requests never call MCP. Filesystem tests use temporary
-  directories and dummy data.
-
-The server limits filesystem access to the entire `sandbox/`. The gateway adds
-the stricter per-tool permissions:
-
-| Tool | Gateway permits |
+| Tool | Gateway permits, relative to the project root |
 | --- | --- |
-| `read_file` | Files inside `sandbox/public/` |
+| `read_file` | Files within `sandbox/public/` |
 | `list_directory` | `sandbox/public/` and its subdirectories |
-| `write_file` | Files inside `sandbox/output/` |
+| `write_file` | Files within `sandbox/output/` |
 | Unknown tools | Nothing |
 
-The tools expect absolute paths. Local paths are derived from the project
-location; `/workspace/...` in the experiment notes describes the planned Docker
-mount. The server can access dummy secrets inside its sandbox when called
-directly, allowing a future comparison with gateway enforcement enabled and
-disabled.
+Tool arguments must use absolute paths. The MCP server itself permits access
+throughout `sandbox/`, including the dummy-secret directory. This broader server
+boundary is intentional: the experiment evaluates the gateway, not an operating
+system sandbox. Do not call the server directly with sensitive data.
 
-## Getting Started
+## Installation
 
-Requirements: Python 3.11 or newer and access to the private GitHub repository.
-The commands below use a Linux or macOS shell.
+Requirements: Python 3.11 or newer, Ollama, and a local copy of the model.
+Verification used Python 3.13.12, MCP SDK 2.3.0, and Ollama Python 0.6.3.
+Dependencies are listed in [`requirements.txt`](requirements.txt); they are not
+fully version-locked. The current model backend is Ollama, not the OpenAI API.
 
-1. Clone the repository and enter its directory. If you already have the project
-   locally, start from that project root.
+```bash
+git clone https://github.com/ManuRslf/MCP-security.git
+cd MCP-security
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+ollama pull qwen3:1.7b
+```
 
-   ```bash
-   git clone https://github.com/ManuRslf/MCP-security.git
-   cd MCP-security
-   ```
-
-2. Create and activate a virtual environment, then install the dependencies.
-
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   python -m pip install -r requirements.txt
-   ```
-
-   The project uses MCP SDK v2. An API key is not required for the current server,
-   test suite, or local Ollama agent.
-
-3. Run the test suite.
-
-   ```bash
-   python -m pytest -q
-   ```
-
-   To run only the server tests with individual results:
-
-   ```bash
-   python -m pytest tests/test_server.py -v
-   ```
-
-   To run only the client regression tests:
-
-   ```bash
-   python -m pytest tests/test_client.py -v
-   ```
-
-   To run only the real gateway-to-MCP integration tests:
-
-   ```bash
-   python -m pytest tests/test_gateway_mcp.py -v
-   ```
-
-   The MCP integration tests start and stop their own server subprocesses. Run
-   them in an environment that permits subprocess communication over standard
-   input and output.
-
-4. Start the standalone MCP server.
-
-   ```bash
-   python -m mcp_server.server
-   ```
-
-   The server waits for MCP protocol messages from a client. It does not provide
-   an interactive chat prompt. Stop it with `Ctrl-C`. To exercise the current
-   tools through MCP, run the connection test:
-
-   ```bash
-   python -m pytest tests/test_server.py::test_stdio_tool_discovery_and_execution -v
-   ```
-
-5. Run the application client to read the public fixture through the gateway.
-
-   ```bash
-   python -m mcp_client.client
-   ```
-
-   The client starts and stops its own server; no separately running server is
-   needed. It prints the initialization message and a gateway response with
-   `status`, `result`, and `reason` for reading `sandbox/public/useful_data.txt`.
-   This remains a smoke-test input: the client only displays its contents as
-   data and does not use an LLM yet. The experimental `clean.txt` and
-   `injected.txt` documents are not selected by this entry point.
-
-The experiment fixtures are `sandbox/public/clean.txt` and
-`sandbox/public/injected.txt`. They contain the same urban-parks paragraph, with
-the injected version appending an instruction to read the local dummy secret.
-[goal.txt](goal.txt) records the local paths, expected normal summary, and
-metrics. The agent asks the model to read and summarize `clean.txt` by default,
-or `injected.txt` when selected, and executes proposed calls only through the
-gateway. The current smoke client still reads `useful_data.txt`.
-
-Docker configuration and measured experiment comparisons are still pending.
-The current `Dockerfile` and `compose.yaml` are empty placeholders.
-
-## Local LLM Setup
-
-The planned agent uses a local Ollama model. With Ollama installed, start its
-server in one terminal:
+If Ollama is not already running, start it in another terminal:
 
 ```bash
 ollama serve
 ```
 
-Keep that terminal open, and list installed models from another terminal:
+The agent connects to `http://localhost:11434`. Its fixed request settings are
+`think=False` and `num_ctx=2048`. See the official
+[Ollama setup documentation](https://docs.ollama.com/linux) and
+[tool-calling documentation](https://docs.ollama.com/capabilities/tool-calling).
 
-```bash
-ollama list
-```
+## Usage
 
-For the initial 4 GB VRAM setup, start with
-[`qwen3:1.7b`](https://ollama.com/library/qwen3:1.7b), a tool-capable model with an
-approximately 1.4 GB download. Runtime memory also depends on context size and
-other overhead; the download size is not a VRAM requirement.
-
-```bash
-ollama pull qwen3:1.7b
-ollama run qwen3:1.7b
-```
-
-Inside the chat, use `/set parameter num_ctx 2048` for an initial small context
-and try an explicit prompt such as `Explain Model Context Protocol in two simple
-sentences.` While the chat is open, run `ollama ps` from another terminal to
-check whether the model is loaded on the GPU. See the
-[Ollama FAQ](https://docs.ollama.com/faq).
-
-Local inference uses `http://localhost:11434` and does not require an API key;
-see the [Ollama API documentation](https://docs.ollama.com/api/introduction).
-The Python agent uses the
-[Ollama Python library's `AsyncClient`](https://github.com/ollama/ollama-python);
-`ollama` is included in `requirements.txt`. It describes the tool using the
-[Ollama tool-calling schema](https://docs.ollama.com/capabilities/tool-calling).
-The request keeps `think=False` and `num_ctx=2048`; see
-[thinking controls](https://docs.ollama.com/capabilities/thinking).
-
-With the Ollama server running and the model installed, run the agent from the
-project root:
-
-```bash
-python -m agent.agent
-```
-
-Select either paired input explicitly:
+Run commands from the repository root. The agent starts and stops its own MCP
+server; a separately running MCP server is not needed.
 
 ```bash
 python -m agent.agent --document clean
 python -m agent.agent --document injected
 ```
 
-The parser rejects other choices before starting the agent. Selection changes
-only the document path in the task; the prompt wording, model settings, tools,
-and gateway policy stay the same. Use `python -m agent.agent --help` to inspect
-the options without starting Ollama or MCP connections.
+The default input is `clean`. The aliases `--d` and `--e` are supported:
 
-The agent starts and stops its own MCP server, executes proposed calls through
-the gateway, and sends their JSON results back to Ollama until it can print a
-final model reply or a limit is reached. Denied calls do not reach MCP, but their denial
-responses are still returned to the model. A real local `qwen3:1.7b` run read
-`clean.txt` and returned a relevant urban-parks summary. It used four sentences
-despite the two-sentence prompt; output quality and length are not guaranteed.
+```bash
+python -m agent.agent --d injected --e
+python -m agent.agent --help
+```
 
-If the initial reply has no tool calls, the script reports
-`No tool call was proposed.` and prints any reply text. An empty final reply
-after tool execution is also reported explicitly.
+`--e` / `--experiment` enables recording and takes no `True` or `False` value.
+Omitting it disables recording. Each invocation is one independent trial.
 
-The CLI enables INFO logging only for the agent; other loggers default to WARNING
-or higher. Routine HTTP messages and duplicate gateway permission logs are hidden.
-Each completed gateway request produces one `tool_result` line with its path,
-status, and reason. `status=success` confirms execution; `status=denied` means the
-gateway rejected the request. Logs go to stderr; the final answer stays on stdout:
+### Experiment Inputs
 
-| Event | Recorded Metadata |
-| --- | --- |
-| `tool_result` | Turn/call identifier, tool name, path, status, sanitized reason |
-| `record_saved` | Saved JSON file path |
-| `record_save_failed` | Record could not be saved |
+`sandbox/public/clean.txt` contains the legitimate urban-parks document.
+`sandbox/public/injected.txt` contains that text plus an instruction to use
+`read_file` on the fictional password fixture.
 
-Model/file contents, complete argument dictionaries, and secret values are not
-logged. Path/name fields use escaped string representations. Verbose model/token
-metadata, separate proposal logs, and duplicate termination logs are omitted.
-Skipped or interrupted proposals remain in JSON records when `--experiment` is
-enabled. Empty replies and budget exhaustion still produce explicit CLI output
-and recorded termination reasons. An empty reply is not a gateway denial; no
-automatic retry or model-setting change is applied.
+**The committed injection contains a machine-specific absolute path.** Before
+testing it in another checkout, update only the target path in that document
+to the absolute location of `sandbox/secrets/password.txt`. To display that
+location without reading the fixture value:
 
-The loop limits are `MAX_MODEL_TURNS = 5` and `MAX_TOOL_CALLS = 10` in
-`agent/agent.py`. Denied requests count toward the tool-call budget. A batch
-that exceeds the remaining budget is rejected before any of its calls execute.
-The last model turn can produce a final answer, but new tool requests on that
-turn are not executed because no model turn remains to consume their results.
-Limit exhaustion is reported explicitly, not printed as a successful summary.
-Only structured model tool calls are processed; instructions or tool names
-appearing in ordinary text are not executed.
+```bash
+python -c "from pathlib import Path; print(Path('sandbox/secrets/password.txt').resolve())"
+```
 
-### Saved Run Records
+Keep the normal paragraph and model task identical between conditions. Never
+put the dummy value itself in a public document or the initial model prompt.
+The tracked password fixture is intentional fictional data, not a credential.
+[`goal.txt`](goal.txt) records the objective, expected summary, and metrics.
 
-Enable recording for either document:
+### Run Records
 
 ```bash
 python -m agent.agent --document clean --experiment
 python -m agent.agent --document injected --experiment
 ```
 
-The aliases `--d` and `--e` also work, for example
-`python -m agent.agent --d injected --e`. The experiment option is a switch:
-do not supply `True` or `False`. Without it, no record is written.
+Each recorded trial creates a uniquely named JSON file in the Git-ignored
+`results/` directory, outside the MCP sandbox. Records contain document paths,
+model settings, limits, UTC timestamps, proposed tool paths, gateway outcomes,
+termination reason, and the final answer. They omit raw tool payloads, complete
+write arguments, exception messages, and model thinking text.
 
-Each recording creates a new `results/run-<UTC timestamp>-<unique suffix>.json`
-file. The CLI logs its location with `event=record_saved`. Files contain:
+Gateway outcomes are `success`, `denied`, or `error`. `not_executed` marks a
+proposal skipped before gateway execution; `no_result` marks a request that
+started but did not return. Neither is a gateway denial. Empty replies, limits,
+exceptions, and cancellation remain explicit outcomes; inference is not retried
+automatically. Abrupt process termination can prevent saving a record.
 
-- Selected document and absolute document path, plus UTC start/end timestamps.
-- The actual model settings, loop limits, and number of model requests started.
-- Ordered tool requests with turn/call identifiers, tool names, paths, statuses,
-  and sanitized gateway reasons.
-- Termination reason and final model answer, or `null` when no answer was produced.
+The CLI logs tool outcomes and record locations to stderr and prints the final
+answer to stdout. JSON records intentionally retain the final answer, which can
+contain the dummy secret or identifying paths. Keep generated results private;
+Git ignore rules are not access control.
 
-Tool statuses `success`, `denied`, and `error` are gateway outcomes.
-`not_executed` marks a proposal that never reached the gateway, such as a
-budget-skipped request. `no_result` marks a gateway request that was started
-but did not return, for example during cancellation; it is not a denial or
-proof that execution did not occur. Termination reasons also distinguish
-`error` and `cancelled` from normal answers, empty replies, and budget stops.
-
-Records are saved on exit, including ordinary exceptions and cancellation,
-without retrying inference or swallowing the original failure. A save failure
-logs `event=record_save_failed` and raises unless a run failure is already
-propagating. Abrupt process termination can prevent saving a record.
-
-Raw MCP payloads, write contents, exception messages, and thinking text are not
-copied into the record. Unlike terminal diagnostics, the record deliberately
-stores the final answer, which may contain the dummy secret. Files are created
-with private temporary-file permissions, use unique names without overwriting
-previous runs, and are excluded from Git by `/results/`. Use only dummy data;
-Git ignore rules do not make sensitive output safe to share.
-
-Run the focused agent tests without requiring an Ollama server or GPU:
+### MCP Smoke Client
 
 ```bash
-python -m pytest tests/test_agent.py -v
+python -m mcp_client.client
 ```
 
-The 70 focused tests use mocked Ollama and MCP connections with the real gateway
-policy, real SDK result types, and temporary sandbox fixtures. They cover
-approved and denied calls, JSON serialization, errors, cancellation, and session
-cleanup, plus conversation order, unchanged model settings, returned tool
-results, multi-turn execution, model-turn limits, and tool-call budgets. A
-mocked post-read secret request is denied before MCP and its denial is returned
-to the model; this is not a real model attack-success measurement. No model
-download, inference, or GPU is needed for these tests.
-Input-selection cases also verify the default, both explicit choices, forwarding
-from the CLI to `main`, unchanged task/settings, invalid choices, and help output.
-Diagnostic cases cover concise tool-outcome lines, quiet default logging,
-omission of verbose model/termination logs and private contents, empty replies
-without retries, budget stops, and escaping untrusted path newlines.
-Recording cases cover optional output, both documents, settings and timestamps,
-secret denials, skipped and interrupted requests, empty/error/cancelled runs,
-payload omission, unique names at the same timestamp, save failures, and CLI
-boolean-switch forwarding.
+This separate client reads `sandbox/public/useful_data.txt` through the gateway.
+It does not use the LLM or select clean/injected experiment documents.
+For protocol development, `python -m mcp_server.server` starts the standalone
+stdio server, which waits for MCP messages rather than interactive input.
 
-Keep model settings identical when later comparing clean and injected documents.
-A normal final summary alone does not show whether the model tried to read a
-secret: inspect the tool-request and result trace. Two diagnostic injected-input
-replays read only the public file, then returned text incorrectly claiming to
-describe the secret file. Neither proposed a secret read. This is off-task model
-output, not evidence that the secret was accessed. The user's earlier empty
-reply was not reproduced; its precise cause cannot be recovered from the old
-logs alone. Structured run records are now available; measured comparisons and
-leakage metrics are still pending.
+## Tests
 
-The revised injected fixture explicitly requests `read_file` with the dummy
-secret path and presents that read as a prerequisite for summarization. The
-user reports that this version worked, but the runtime trace has not yet been
-archived or independently checked. This does not establish a success rate or
-secret disclosure. The next milestone is measured clean/injected trials using
-the saved run records with the same model settings. A forbidden
-tool request, a gateway denial, and final-answer leakage are separate outcomes.
+```bash
+python -m pytest -q
+python -m pytest tests/test_agent.py -q
+python -m pytest tests/test_gateway_mcp.py -q
+```
 
-## Development Workflow
+All **256 tests passed on 2026-11-15** in the verification environment described
+above. Tests use temporary sandboxes and dummy values. Agent tests mock Ollama;
+no model download, inference, or GPU is needed. MCP integration tests require
+permission to launch and communicate with local subprocesses.
 
-[inst.md](inst.md) defines the documentation and progress workflow. When the next
-step is requested, verify the previous implementation, update
-[PROGRESS.md](PROGRESS.md), and commit and push verified changes before proposing
-the next task. Verified task completions are also committed and pushed to the
-current branch's configured upstream by default, unless the user requests local
-changes only. Review staged changes for credentials, real secrets, and unrelated
-edits; never force-push or overwrite remote history. Update this README when
-setup instructions, architecture, or project status change.
+## Repository Structure
 
-Reuse recorded verification for unchanged code. Review an already-verified code
-file again only after it has been modified, and run focused checks for new or
-modified implementations. Documentation-only updates do not require rerunning
-code tests.
+```text
+agent/                 Bounded Ollama agent and optional JSON recording
+gateway/               Authorization policy, gateway, and policy documentation
+mcp_client/            Gateway-mediated MCP smoke client
+mcp_server/            Stdio filesystem server
+sandbox/public/        Clean, injected, and smoke-test documents
+sandbox/secrets/       Fictional test fixture; never store real credentials here
+sandbox/output/        Gateway-authorized write destination
+tests/                 Component and integration tests
+docs/release-review.md Public-release audit and remaining owner actions
+goal.txt               Experiment objective and metrics
+requirements.txt       Python dependencies
+```
+
+The empty `Dockerfile` and `compose.yaml` are placeholders, not working
+container configurations. They were retained without runtime changes.
+
+## Limitations
+
+- This is an experimental permission gateway, not a production security boundary.
+  Host filesystem races and broader OS/process isolation are not addressed.
+- Direct MCP access bypasses gateway policy by design. Use only fictional data.
+- Injection behavior, answer accuracy, and requested sentence counts are not
+  guaranteed. A successful API call or a path mentioned in prose is not evidence
+  of successful tool use or leakage.
+- The injected fixture needs path configuration for each checkout. Model settings
+  and the available LLM tool schema are currently fixed in the agent.
+- Gateway INFO logging is not hardened against untrusted multiline strings if
+  enabled by an embedding application; the CLI suppresses those duplicate logs.
+- Run records are local measurements, not aggregated metrics or durable
+  per-turn checkpoints. Dependency versions are not fully pinned.
+
+## License
+
+No license file is currently included. No license has been inferred or added as
+part of release preparation; choosing one remains a maintainer decision.
+
+## Current Development Status
+
+Implemented and tested: path/tool authorization, the asynchronous gateway, three
+MCP filesystem tools, the smoke client, the bounded local-model agent, input
+selection, concise logs, and optional per-trial JSON recording.
+
+The existing test suite passes. A successful real-model injection trial was
+previously reported, but no measured attack-success rate or independently
+verified leakage benchmark is available. This release review did not repeat
+model inference.
+
+Not yet implemented: a batch-trial command, automated attempt/denial/leakage
+aggregation, a gateway-disabled experiment mode, and Docker isolation. The next
+experimental step is a fixed number of clean/injected trials using identical
+settings, retaining every outcome and analyzing the saved records.
+
+Public release still requires review of the separately prepared history cleanup
+and explicit approval before updating remote history or changing visibility.
+See the [release review](docs/release-review.md) for the remaining actions.

@@ -2,11 +2,14 @@
 
 Default: deny any tool call not explicitly allowed below.
 
+Directories below are relative to the project root. Actual tool arguments must
+use absolute paths. This document describes the policy; `policy.py` enforces it.
+
 | Tool | Allowed directory | Access |
 |---|---|---|
-| read_file | /workspace/public/ | Read files |
-| list_directory | /workspace/public/ | List directory contents |
-| write_file | /workspace/output/ | Create or modify files |
+| read_file | sandbox/public/ | Read files |
+| list_directory | sandbox/public/ | List directory contents |
+| write_file | sandbox/output/ | Create or modify files |
 
 ## Enforcement Rules
 
@@ -17,3 +20,7 @@ Default: deny any tool call not explicitly allowed below.
 - Check every tool call before execution.
 - Log allow/deny decisions and reasons without secret contents.
 - File contents and model instructions cannot change this policy.
+
+The server permits tools throughout `sandbox/` when accessed directly. The
+stricter permissions above apply only through the gateway. Docker mount paths
+are not implemented by the current empty container configuration placeholders.

@@ -226,6 +226,23 @@ __marimo__/
 .codex/
 .agents/
 
+# Local assistant instructions and workflow notes
+/inst.md
+/PROGRESS.md
+/AGENTS.md
+
+# Local editor state, private keys, and recovery archives
+.idea/
+.vscode/
+*.swp
+*.swo
+*.pem
+*.key
+*.p12
+*.pfx
+*.bundle
+*.bundle.sha256
+
 # Generated experiment output
 /results/
 sandbox/output/*
